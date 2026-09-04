@@ -1,0 +1,17 @@
+# Ambiente virtual
+venv/
+
+# Cache do Python
+__pycache__/
+*.pyc
+
+# IDE / editores
+.vscode/
+.idea/
+
+# Credenciais — nunca versionar
+.env
+
+# Arquivos temporarios do sistema
+Thumbs.db
+.DS_Store
