@@ -524,15 +524,22 @@ class APIExtratorSEI:
         return True
 
     def _montar_payload_troca(self, html, unidade):
-        """Lê o form 'infra_trocar_unidade' e devolve (action, payload)."""
+        """
+        Lê o form 'frmInfraSelecaoUnidade' e devolve (action, payload) fiel ao
+        que o JavaScript do SEI envia.
+
+        O JS da versão 5.0.4 cria um campo oculto 'selInfraUnidades' com o id
+        da unidade escolhida antes de submeter; sem ele a troca não acontece.
+        """
         sopa = BeautifulSoup(html, "html.parser")
-        form = None
-        for f in sopa.find_all("form"):
-            if f.find("input", {"name": "hdnInfraItens"}) or f.find(
-                "input", {"name": "chkInfraItem"}
-            ):
-                form = f
-                break
+        form = sopa.find("form", {"id": "frmInfraSelecaoUnidade"})
+        if form is None:
+            for f in sopa.find_all("form"):
+                if f.find("input", {"name": "hdnInfraItens"}) or f.find(
+                    "input", {"name": "chkInfraItem"}
+                ):
+                    form = f
+                    break
         if form is None:
             return "", {}
 
@@ -540,11 +547,30 @@ class APIExtratorSEI:
         if not action.startswith("http"):
             action = BASE_SEI + action
 
+        # Todos os campos nomeados enumerados do form (hidden, texto, radios, selects).
         payload = {}
-        for inp in form.find_all("input", {"type": "hidden"}):
+        for inp in form.find_all("input"):
             nome = inp.get("name")
-            if nome:
+            if not nome:
+                continue
+            tipo = (inp.get("type") or "text").lower()
+
+            if tipo == "radio":
+                # marca a unidade escolhida; demais rádios ficam de fora
+                if inp.get("value") == unidade:
+                    payload[nome] = unidade
+            elif tipo == "checkbox":
+                if inp.has_attr("checked"):
+                    payload[nome] = inp.get("value", "on")
+            else:
                 payload[nome] = inp.get("value", "")
+
+        for sel in form.find_all("select"):
+            nome = sel.get("name")
+            if not nome:
+                continue
+            opcao = sel.find("option", selected=True) or sel.find("option")
+            payload[nome] = opcao.get("value", "") if opcao else ""
 
         disponiveis = [
             ck.get("value", "") for ck in form.find_all("input", {"name": "chkInfraItem"})
@@ -553,7 +579,9 @@ class APIExtratorSEI:
             print(f"  Unidade {unidade} não está disponível em {disponiveis}.")
             return "", {}
 
-        payload["chkInfraItem"] = unidade
+        # Campo que o JavaScript cria na hora do submit (a chave da troca).
+        payload["selInfraUnidades"] = unidade
+        payload["chkInfraItem"] = unidade     # rádio marcado = unidade alvo
         payload["hdnInfraNroItens"] = str(len(disponiveis))
         return action, payload
 
@@ -588,8 +616,12 @@ class APIExtratorSEI:
     # ------------------------------------------------------------
     # 3.4 RASPAR AS N PRIMEIRAS PÁGINAS DA CAIXA DE RECEBIDOS
     # ------------------------------------------------------------
-    def extrair_caixa_recebidos(self, limite_paginas=LIMITE_PAGINAS):
-        """Varre somente a caixa 'Processos Recebidos' (1ª até N-ésima página)."""
+    def extrair_caixa_recebidos(self, limite_paginas=LIMITE_PAGINAS, atraso=0.6):
+        """Varre somente a caixa 'Processos Recebidos' (1ª até N-ésima página).
+
+        `atraso` é o intervalo (em segundos) entre uma página e outra.
+        Menor atraso => mais rápido, porém mais "agressivo" com o servidor.
+        """
         html = self.navegar_para_controle()
         if not html or not any(
             t in html for t in ("tblProcessosDetalhado", "tblProcessosRecebidos", "tblProcessos")
@@ -630,7 +662,7 @@ class APIExtratorSEI:
                 break
 
             pagina += 1
-            time.sleep(0.6)  # delicadeza com o servidor
+            time.sleep(max(0.0, float(atraso)))  # delicadeza com o servidor
             resposta = self._requisicao_segura("post", action_url, data=form_data, timeout=30)
             html = resposta.text
 
