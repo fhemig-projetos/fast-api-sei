@@ -1,62 +1,34 @@
-# -*- coding: utf-8 -*-
-"""
-app4_inclusao.py — INCLUSÃO DE DOCUMENTO INTERNO EM PROCESSO EXISTENTE (SEI-MG)
-
-OBJETIVO
---------
-Criar um documento (Relatório, Memorando, etc.) dentro de um processo já existente
-no SEI-MG, no modo "documento interno", seguindo o fluxo oficial de 4 passos:
-
-    Passo 1 (Escolher tipo)  : GET  controlador.php?acao=documento_escolher_tipo&id_procedimento=<id>
-                               POST controlador.php?acao=documento_escolher_tipo (hidden + id_serie)
-                               -> HTTP 302 com Location apontando para documento_gerar
-    Passo 2 (Tela de geração): GET  Location (tela documento_gerar) -> <form id="frmDocumentoGerar">
-                               -> extrair TODOS os hidden inputs -> payload_base
-    Passo 3 (Salvar)          : POST controlador.php?acao=documento_gerar (payload_base + campos de negócio)
-                               -> HTTP 302
-    Passo 4 (Capturar id)     : Ler header Location do 302 -> extrair id_documento
-
-ISOLAMENTO
-----------
-Este arquivo NÃO modifica o app3.py (que continua sendo o robô de LEITURA da caixa).
-Ele herda apenas a base de autenticação/troca de unidade de APIExtratorSEI e usa uma
-camada de requisição PRÓPRIA (_requisicao_escrita) com whitelist/blacklist dedicadas
-à escrita, além de auditoria em arquivo separado (log_auditoria_escrita.txt).
-
-REGRAS DE OURO (infra_hash/CSRF)
---------------------------------
-* NUNCA prever, gerar ou fixar (hardcode) infra_hash;
-* Toda requisição POST parte de um GET anterior; o payload é montado copiando os
-  hidden inputs do formulário (que carregam hashes/IDs fresquinhos) e sobrescrevendo
-  apenas os campos de negócio necessários;
-* URLs de redirecionamento (Location) são limpas de mojibake latin-1 -> utf-8 antes
-  de qualquer uso (correção do clássico UnicodeDecodeError/acentos malformados do SEI-MG).
-
-SEGURANÇA
----------
-* o fluxo exige confirmar=True (ou --confirmar) para qualquer gravação real;
-* --dry-run prepara o payload final e NÃO envia o POST de criação;
-* --salvar-telas grava o HTML de cada etapa em .\\ruas_inclusao\\ para inspeção.
-
-USO
----
-    python app4_inclusao.py --id-procedimento 921716684 --serie 63 --hipotese-legal 4 --confirmar
-    python app4_inclusao.py --id-procedimento 921716684 --serie 63 --dry-run
-"""
-
 import os
-import re
+import os as _os
 import sys
+_root_ = _os.path.dirname(_os.path.abspath(__file__))
+
+def _carregar_env_():
+    _env_path = _os.path.join(_root_, ".env")
+    if _os.path.exists(_env_path):
+        with open(_env_path, encoding="utf-8") as _fh:
+            for _linha in _fh:
+                _linha = _linha.strip()
+                if not _linha or _linha.startswith("#") or "=" not in _linha:
+                    continue
+                _chave, _, _valor = _linha.partition("=")
+                _os.environ[_chave.strip()] = _valor.strip().strip(" ").strip(chr(39)).strip(chr(34))
+
+_carregar_env_()
+
+# Garante que scripts_read é importável via import from package
+if _root_ not in sys.path:
+    sys.path.insert(0, _root_)
+
+import re
 import time
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 # Herança da base de autenticação (login/troca de unidade). Nada do app3.py é alterado.
-from app3 import (  # noqa: E402
+from scripts_read.app3 import (  # noqa: E402
     UNIDADE_ALVO,
     USUARIO,
     SENHA,
@@ -185,28 +157,29 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
     @staticmethod
     def _extrair_hidden_inputs(form):
         """
-        Colhe todos os campos enviáveis de um formulário (hidden + text), conforme
-        um submit padrão faria. Contém todos os infra_hash/IDs fresquinhos da tela.
+        Colhe todos os campos enviaveis de um formulario (hidden, text, textarea e
+        select), como um submit padrao faria. E daqui que saem todos os infra_hash
+        e IDs fresquinhos da tela (regra de ouro: nunca inventar/prever hash).
         """
         payload = {}
         if form is None:
             return payload
-        for inp in form.find_all("input"):
-            nome = inp.get("name")
+        for tag in form.find_all(["input", "select", "textarea"]):
+            nome = tag.get("name")
             if not nome:
                 continue
-            tipo = (inp.get("type") or "text").lower()
-            if tipo in ("submit", "button", "image", "checkbox", "radio", "file"):
+            if tag.name == "select":
+                opcao = tag.find("option", selected=True) or tag.find("option")
+                payload[nome] = opcao.get("value", "") if opcao is not None else ""
                 continue
-            valor = inp.get("value", "")
+            if tag.name == "textarea":
+                valor = tag.get_text() or ""
+            else:  # <input>
+                tipo = (tag.get("type") or "text").lower()
+                if tipo in ("submit", "button", "image", "checkbox", "radio", "file"):
+                    continue
+                valor = tag.get("value", "")
             payload[nome] = valor if valor is not None else ""
-        # <select> de valor único (o submit também envia o option selecionado)
-        for sel in form.find_all("select"):
-            nome = sel.get("name")
-            if not nome:
-                continue
-            opcao = sel.find("option", selected=True) or sel.find("option")
-            payload[nome] = opcao.get("value", "") if opcao is not None else ""
         return payload
 
     @staticmethod
@@ -323,7 +296,7 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
 
     def _localizar_processo_na_caixa(self, numero, limite_paginas=20):
         """Varre a caixa de processos da unidade atual e acha o processo pelo numero."""
-        from app3 import raspar_pagina_recebidos
+        from scripts_read.app3 import raspar_pagina_recebidos
 
         html = self.navegar_para_controle()
         if not html or not any(t in html for t in ("tblProcessosDetalhado", "tblProcessosRecebidos", "tblProcessos")):
@@ -453,7 +426,7 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
 
         Parâmetros
         ----------
-        id_procedimento      : id interno do processo (ex.: "921716684")
+        id_procedimento      : id interno do processo (ex.: "000000000")
         id_serie             : id da série/tipo de documento (ex.: "63" = Relatório)
         id_hipotese_legal    : id da hipótese legal (ex.: "4") para nível Restrito
         texto_inicial        : "N" = branco | "T" = texto padrão
@@ -464,7 +437,8 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
 
         Retorno
         -------
-        str — id_documento criado (ex.: "941573640").
+        str  — id_documento criado (ex.: "000000000"), quando grava de verdade.
+        dict — payload montado, quando dry_run=True (nada e gravado).
 
         Erros
         -----
@@ -526,7 +500,9 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
                 if len(str(valor)) > 120:
                     valor = str(valor)[:120] + "..."
                 print(f"  {chave} = {valor}")
-            return None
+            # Dry-run devolve o PAYLOAD montado (e nao o id_documento), permitindo
+            # inspecionar/validar todos os campos antes de qualquer gravacao real.
+            return payload
 
         resp_final = self._requisicao_escrita(
             "post", action_gerar, data=payload, allow_redirects=False, timeout=30
@@ -773,6 +749,11 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         payload = self._extrair_hidden_inputs(form)
 
         # Metadados obrigatórios do documento interno
+        # Flag de ação do formulário: o JS do SEI (submeter(), disparado pelo
+        # botão Salvar) faz hdnFlagDocumentoCadastro = '2' imediatamente antes do
+        # submit. Enviar o valor original da tela ('1') faz o servidor apenas
+        # re-renderizar a página (HTTP 200) SEM criar o documento.
+        self._atribuir_campo(payload, ["hdnFlagDocumentoCadastro"], "2")
         # rdoFormato: N = Nato-digital (documento interno sem arquivo anexo) —
         # sem esse radio o SEI-MG trata como anexo e reclama de extensao de arquivo.
         self._atribuir_campo(payload, ["rdoFormato"], "N")
@@ -831,11 +812,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Inclusão de documento interno no SEI-MG.")
     parser.add_argument(
         "--id-procedimento",
-        help="ID interno do processo (ex.: 934214083). Use OU --processo.",
+        help="ID interno do processo (ex.: 000000000). Use OU --processo.",
     )
     parser.add_argument(
         "--processo",
-        help="Numero formatado do processo (ex.: 2270.01.0064841/2026-56) — busca automatica na caixa da unidade",
+        help="Numero formatado do processo (ex.: 0000.00.0000000/0000-00) — busca automatica na caixa da unidade",
     )
     parser.add_argument(
         "--unidade",

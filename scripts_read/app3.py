@@ -9,8 +9,17 @@ from bs4 import BeautifulSoup
 
 
 def _carregar_credenciais():
-    caminho_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if os.path.exists(caminho_env):
+    # Procura o .env ao lado deste script, na raiz do projeto (pasta pai) e no CWD.
+    # Assim o modulo funciona tanto rodando direto quanto sendo importado do projeto.
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidatos_env = (
+        os.path.join(base, ".env"),
+        os.path.join(os.path.dirname(base), ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    )
+    for caminho_env in candidatos_env:
+        if not os.path.exists(caminho_env):
+            continue
         with open(caminho_env, encoding="utf-8") as f:
             for linha in f:
                 linha = linha.strip()

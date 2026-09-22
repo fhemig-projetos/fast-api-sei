@@ -15,3 +15,24 @@ __pycache__/
 # Arquivos temporarios do sistema
 Thumbs.db
 .DS_Store
+# ---------------------------------------------------------------------------
+# DADOS SENSIVEIS DO SEI (LGPD) - NUNCA versionar
+# ---------------------------------------------------------------------------
+
+# Logs de auditoria: contem URLs com infra_hash e IDs de processos
+log_auditoria*.txt
+
+# Telas HTML capturadas do SEI: contem infra_hash de sessao e dados de processos
+ruas_inclusao/
+drawable/
+controle_atual.html
+resposta_login.html
+debug_pagina.html
+*_janela.html
+
+# Saidas geradas: planilhas com dados de processos e pessoas
+outputs/
+*.xlsx
+
+# Dumps de diagnostico do fluxo de escrita
+payload_gerar.json

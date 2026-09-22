@@ -1,0 +1,22 @@
+# ============================================================
+#  Dependências do projeto API SEI (caixa de processos)
+#  Python 3.13  ·  Ambiente testado: venv\Scripts\pip install -r requirements.txt
+# ============================================================
+
+# --- HTTP / sessão ---
+requests==2.34.2
+
+# --- Parsing de HTML ---
+beautifulsoup4==4.15.0
+
+# --- Dados / planilhas ---
+pandas==3.0.5
+numpy==2.5.2
+openpyxl==3.1.5
+
+# --- API HTTP (FastAPI) ---
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.5
+python-dotenv==1.2.3
+python-multipart==0.0.32
