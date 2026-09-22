@@ -1,7 +1,16 @@
 import io
+import os
+import sys
 import threading
 import uuid
 from datetime import datetime, timezone
+
+# app3.py vive em scripts_read/ — garante os caminhos antes de importa-lo,
+# venha o modulo de api/api.py ou de qualquer outro diretorio de trabalho.
+_RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _caminho in (os.path.join(_RAIZ, "scripts_read"), _RAIZ):
+    if _caminho not in sys.path:
+        sys.path.insert(0, _caminho)
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException
@@ -202,4 +211,4 @@ def baixar_excel(task_id: str):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("api:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)
