@@ -30,6 +30,9 @@ O projeto foi construído sobre duas regras invioláveis:
 | `teste_payload.py` | Diagnóstico: mostra o payload montado no `--dry-run` (não grava nada). |
 | `api/api.py` | **FastAPI**: expõe a raspagem como tarefas em segundo plano + download do Excel. |
 | `scripts_write/fix_app4_indent.py` | Ferramenta pontual: repara a indentação de `_extrair_hidden_inputs` se o arquivo for corrompido. |
+| `scripts_write/valida_modelo_offline.py` | Teste **offline** do fluxo "Documento Modelo": monta o payload a partir do HTML salvo em `ruas_inclusao/` — **não autentica nem toca no SEI**. |
+| `scripts_write/testa_mailmerge_offline.py` | Teste **offline** do Mail Merge: valida parsers, regras de mesclagem e contagens contra a fixture `4_editor_montar_FIXTURE.html` — **não toca no SEI**. |
+| `teste_leitura_planilha.py` | Prova de conceito isolada: lê o Excel e substitui marcadores numa string HTML fictícia (sem SEI). |
 | `.env` | Credenciais `SEI_USUARIO` / `SEI_SENHA` — **nunca versionado**. |
 | `requirements.txt` | Dependências com versões fixadas (ambiente testado). |
 | `outputs/` | Planilhas e HTML das execuções — **não versionado**. |
@@ -134,6 +137,11 @@ acessível na caixa da unidade. O arquivo é **isolado** do núcleo de leitura:
 4. **Capturar o id** — a resposta é **302** e o `Location` traz
    `...&id_documento=NNNNNNNNN...`, extraído por regex e registrado no log.
 
+Opcionalmente há um **passo 2b**: quando `--protocolo-modelo` é informado, a lupa
+`documento_modelo_selecionar` é chamada em modo **leitura** (URL e `infra_hash`
+lidos do **JS da própria tela**) para trazer o id interno do modelo — ver a
+seção *Documento Modelo* abaixo.
+
 ### Uso
 
 ```bash
@@ -142,6 +150,13 @@ venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unid
 
 # 2) GRAVACAO REAL - somente com --confirmar
 venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unidade 110031457 --serie 12 --hipotese-legal 4 --confirmar
+
+# 3) DOCUMENTO MODELO - Cessao Especial Onus Cedente (serie 4110) tendo o
+#    protocolo 148410511 como modelo; a simulacao mostra o payload montado
+venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unidade 110031457 --serie 4110 --protocolo-modelo 148410511 --dry-run --salvar-telas
+
+# 4) Idem, gravando de verdade
+venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unidade 110031457 --serie 4110 --protocolo-modelo 148410511 --confirmar
 ```
 
 | Flag | Padrão | Função |
@@ -149,13 +164,22 @@ venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unid
 | `--processo` | — | Número formatado do processo (busca automática na caixa) |
 | `--id-procedimento` | — | Id interno do processo (use **um** dos dois) |
 | `--unidade` | `110007141` | Id da unidade onde o processo está |
-| `--serie` | `63` | Id da série/tipo de documento |
+| `--serie` | `63` | Id da série/tipo de documento (`4110` = Cessão Especial Ônus Cedente) |
 | `--hipotese-legal` | `4` | Hipótese legal do nível Restrito |
-| `--texto-inicial` | `N` | `N` = branco, `T` = texto padrão |
+| `--texto-inicial` | `N` | `N` = branco, `T` = texto padrão, `D` = documento modelo (exige `--protocolo-modelo`) |
+| `--protocolo-modelo` | — | Protocolo do documento usado como **Documento Modelo** (ex.: `148410511`); força `rdoTextoInicial=D` |
+| `--id-documento-modelo` | — | Id interno do modelo (`hdnIdDocumentoTextoBase`), quando já conhecido |
+| `--sem-consultar-modelo` | off | Não chama a lupa `documento_modelo_selecionar`; injeta só o protocolo no payload |
 | `--dry-run` | off | Prepara e exibe o payload; **não grava** (devolve o payload montado) |
 | `--salvar-telas` | off | Salva o HTML de cada etapa em `ruas_inclusao/` |
 | `--confirmar` | off | **Obrigatório** para gravar de verdade |
 | `--mesmo-assim` | off | Prossegue mesmo em processo **NÃO VISUALIZADO** (evite) |
+| `--planilha [caminho]` | — | Excel de **Mail Merge**; sem valor usa `planilha exemplo cessao especial.xlsx` (raiz ou `~/Downloads`) |
+| `--linha` | `0` | Índice da linha da planilha a mesclar |
+| `--editar-documento ID` | — | Aplica o Mail Merge em um documento **já criado** (pula a criação) |
+| `--lote` | off | Cria um documento **por linha** da planilha e mescla em cada um |
+| `--a-partir-de N` | — | Com `--lote`: índice inicial (**retomada** após falha) |
+| `--ate-linha N` | — | Com `--lote`: índice final do lote |
 
 ### Séries usadas na prática
 
@@ -164,10 +188,112 @@ venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unid
 | Relatório | `63` |
 | Memorando | `12` |
 | Memorando-Circular | `13` |
+| Cessão Especial Ônus Cedente | `4110` |
 
 Para descobrir outras séries: rode com `--salvar-telas` e leia
 `ruas_inclusao/1_escolher_tipo_*.html` — cada tipo aparece como
 `onclick="escolher(<id>)"` / `value="<id>"`.
+
+### Documento Modelo (Cessão Especial Ônus Cedente — `--serie 4110`)
+
+Em vez de nascer com o texto inicial em branco, o documento pode ser gerado a
+partir de um **Documento Modelo** já existente no SEI. Basta informar o
+protocolo do modelo:
+
+```bash
+venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unidade 110031457 --serie 4110 --protocolo-modelo 148410511 --dry-run --salvar-telas
+```
+
+**O que muda no formulário** (só isso; o resto do payload continua igual):
+
+| Campo | Valor enviado | Por quê |
+|---|---|---|
+| `rdoTextoInicial` | **`D`** | Opção "Documento Modelo" (`T` = Texto Padrão, `N` = Nenhum) |
+| `txtProtocoloDocumentoTextoBase` | protocolo do modelo | É o campo da tela ("Documento Modelo" + protocolo) |
+| `hdnIdDocumentoTextoBase` | `value` do radio da lupa **ou vazio** | `infraTableToHiddenText()` grava `box.value` (id do favorito) no hidden e `box.title` (protocolo) no campo visível; sem par `title`+`value` confiável, vai vazio |
+| `txtTextoPadrao`, `hdnIdTextoPadrao` | vazio | `configurarTextoInicial()` limpa o "Texto Padrão" ao marcar o modelo |
+
+Sequência executada:
+
+1. `GET documento_gerar...&id_serie=4110` — a tela de cadastro do documento.
+2. **Passo 2b** — `GET documento_modelo_selecionar&tipo_selecao=1&id_object=objLupaDocumentoTextoBase...`
+   em modo **leitura**, com URL e `infra_hash` **lidos do JS da própria tela**
+   (`new infraLupaText('txtProtocoloDocumentoTextoBase','hdnIdDocumentoTextoBase', ...)`).
+   Se o HTML devolvido trouxer o radio `chkInfraItem` cujo `title` é o
+   protocolo, o `value` dele vai para `hdnIdDocumentoTextoBase`; senão o
+   protocolo segue sozinho (o backend do SEI resolve o modelo). Falha nessa
+   lupa é **aviso, não erro**.
+3. `POST documento_gerar` (hash do próprio formulário), com
+   `hdnFlagDocumentoCadastro=2` e `rdoFormato=N`.
+
+> `--sem-consultar-modelo` pula o passo 2b e injeta só o protocolo — útil se, na
+> sua sessão, o GET da lupa interferir no hash da tela de geração.
+
+Teste **offline** do payload (não autentica, não toca no SEI):
+
+```bash
+venv\Scripts\python scripts_write\valida_modelo_offline.py
+```
+
+### Mail Merge — mesclagem de dados da planilha (`--planilha`)
+
+Cria o documento a partir do modelo e **substitui os marcadores de texto** pelos
+dados do servidor lidos do Excel. A cadeia reproduz o clique manual no lápis
+("Editar Conteúdo") do documento:
+
+1. Árvore do processo (já visualizado na criação).
+2. Link do **nó** do documento → árvore "com o documento selecionado" (é nessa
+   variante que o SEI renderiza os links do editor).
+3. `GET controlador_ajax.php?acao_ajax=documento_verificar_assinatura` (leitura).
+4. `GET editor_montar` → **todos** os `textarea txaEditor_XXXXX` (cabeçalho,
+   corpo, rodapé...), hidden inputs e a `action` do form.
+5. Merge por `REGRAS_MERGE`, com contador por marcador impresso no console.
+6. `GET ...acao_ajax=corfirmacao_atualizacao_documento` (confirmação do editor).
+7. `POST editor/editor_processar.php?acao=editor_salvar` — sucesso validado pelo
+   `OK<versão>` que o próprio editor do SEI espera no iframe.
+
+```bash
+# Documento único, mesclando a linha 0
+venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" \
+  --unidade 110031457 --serie 4110 --protocolo-modelo 148410511 \
+  --confirmar --planilha --linha 0
+
+# Documento já existente (pula a criação)
+... --confirmar --planilha --editar-documento 900000001
+
+# Lote: um documento por linha da planilha
+... --confirmar --planilha --lote
+
+# Retomar após uma falha
+... --confirmar --planilha --lote --a-partir-de 7
+```
+
+> **`--lote` é fail-fast**: para no primeiro erro e imprime a linha exata para
+> retomar com `--a-partir-de`. Cada linha cria **um** documento novo — o fluxo
+> não é idempotente, então revise o log antes de repetir.
+
+Marcadores do modelo e a coluna da planilha (`REGRAS_MERGE`):
+
+| Marcador no modelo | Coluna |
+|---|---|
+| `(NOME DO(A) SERVIDOR(A) CEDIDO(A))`, `(NOME DO SERVIDOR CEDIDO)`, `(NOME)`, `[NOME DO SERVIDOR]` | `Nome Servidor` |
+| `(Nº)` após `MASP` | `MASP` |
+| `(Nº)` após `ADM` | `ADM` |
+| `(SIGLA DO CARGO)` | `Cargo` |
+| `(FUNÇÃO)` | `Função` |
+| `XX` (título do termo) | `Nº do termo` |
+| `[DATA DO DIA DO PREENCHIMENTO]` | data de hoje |
+
+> `MASP` e `ADM` usam o **mesmo** marcador `(Nº)` no modelo — por isso a regra é
+> contextual (regex que ancora na palavra). Trocar o texto no modelo exige
+> atualizar `REGRAS_MERGE`; o contador de cada regra avisa quando um marcador
+> deixa de ser encontrado.
+
+Teste **offline** do merge (não autentica, não toca no SEI):
+
+```bash
+venv\Scripts\python scripts_write\testa_mailmerge_offline.py
+```
 
 ### Detalhes técnicos que o código já resolve
 
@@ -187,6 +313,15 @@ funcionar — valem como documentação de manutenção:
 - **O `Location` costuma vir com mojibake** (`ç` lido como `Ã§`); existe um
   saneamento `latin-1 → utf-8` aplicado só quando o conteúdo é realmente
   mojibake, evitando `UnicodeDecodeError` no `requests`.
+- **O "Documento Modelo" viaja em `rdoTextoInicial=D`** +
+  `txtProtocoloDocumentoTextoBase`. O `hdnIdDocumentoTextoBase` segue o framework
+  (botão *Transportar* → `infraTransportarSelecao()` → `infraTableToHiddenText()`):
+  **`txt = box.title`** (o protocolo) e **`hdn = box.value`** (o id do favorito na
+  lista). O `id_documento=` dos links da coluna de ação é de visualizar e é
+  **ignorado**; sem par `title`+`value` confiável o hidden vai **vazio**.
+- **A lupa não recebe hash de outro lugar**: a URL de `documento_modelo_selecionar`
+  é extraída do `<script>` da tela de geração, com o `infra_hash` **dela** — que é
+  diferente do hash do formulário. Nada é previsto, fixado ou reaproveitado.
 
 ---
 
@@ -254,6 +389,8 @@ Práticas embutidas no código:
 | `Processo ... nao encontrado na caixa da unidade` | unidade errada ou processo fora da caixa | confira o `--unidade` (SEI → Trocar Unidade) |
 | `ABORTADO: processo NAO VISUALIZADO` | proteção de prazo | use `--mesmo-assim` apenas com certeza absoluta |
 | `documento_gerar nao redirecionou apos criar (HTTP 200)` | validação do SEI | confira `hdnFlagDocumentoCadastro=2` no `--dry-run` e veja `ruas_inclusao/3_erro_gerar_*.html` |
+| `Aviso: lupa nao devolveu o id do modelo` | layout do popup mudou ou o modelo não está na lista | não é erro: o protocolo continua indo no POST; `--sem-consultar-modelo` silencia o aviso |
+| `--protocolo-modelo` + `--texto-inicial`| regra do radio `D` | remova `--texto-inicial` (o modelo sempre força `D`) |
 | `Tela de escolha de tipo nao expoe o formulario` | sem permissão no processo | verifique a permissão do usuário na unidade |
 | `Operação de ESCRITA cancelada` | faltou `--confirmar` | use `--confirmar` (ou `--dry-run`) |
 | `IndentationError` em `app4_inclusao.py` | arquivo corrompido em edição | `venv\Scripts\python scripts_write\fix_app4_indent.py` |
@@ -272,5 +409,6 @@ relativos.
 - Rodar `app4_inclusao.py --confirmar` duas vezes cria **um novo documento a
   cada execução** (o fluxo não é idempotente).
 - Documentos criados saem como **Nato-digital** (`rdoFormato=N`), com o nível de
-  acesso conforme a hipótese legal informada e sem texto (`--texto-inicial N`).
+  acesso conforme a hipótese legal informada e sem texto (`--texto-inicial N`) —
+  ou a partir de um **Documento Modelo**, quando `--protocolo-modelo` é usado.
 
