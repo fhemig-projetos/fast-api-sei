@@ -1371,41 +1371,145 @@ def carregar_planilha(caminho):
     return linhas
 
 
-def _resolver_processo_da_linha(api, item, args, id_procedimento_padrao):
+def _processo_marca_nao_visualizado(achado):
     """
-    Devolve o id_procedimento a usar para a linha do lote.
+    Regra de ouro nº 1 (unica fonte da verdade): o item da caixa esta marcado
+    como "Nao Visualizado"? Abrir a URL principal de um processo assim inicia a
+    contagem de prazo no servidor - por isso abortamos ANTES de abrir.
+    """
+    if not achado:
+        return False
+    valor = achado.get("NaoVisualizado")
+    if isinstance(valor, str):
+        return valor.strip().lower() in ("true", "1", "sim", "verdadeiro", "s")
+    return bool(valor)
 
-    Prioridade: coluna "Processo SEI" da propria linha; se ela existir e diferir do
-    processo da CLI, o processo e buscado na caixa (com a trava de NAO VISUALIZADO).
-    Nenhum processo e adivinhado: sem coluna e sem --processo, aborta.
+
+class _ResolvedorProcessos:
     """
-    indice = item["indice"]
-    processo_item = item["processo"]
-    if not processo_item:
-        if not args.processo:
-            sys.exit(
-                f"ABORTADO no lote (linha {indice}): a planilha nao tem 'Processo SEI' "
-                "e nenhum --processo foi informado na CLI."
+    Resolve o id_procedimento de cada linha do lote, com CACHE por numero.
+
+    Sem o cache, uma planilha com N linhas do mesmo processo raspa a caixa N
+    vezes (cada raspagem recarrega a caixa). Aqui cada numero e buscado uma unica
+    vez e reaproveitado. Erros ficam guardados por numero e sao levantados
+    apenas no pre-voo, com o indice da linha afetada.
+    """
+
+    def __init__(self, api, args, id_procedimento_padrao=None):
+        self.api = api
+        self.args = args
+        self.id_procedimento_padrao = id_procedimento_padrao
+        self._cache = {}
+
+    def resolver(self, item):
+        """
+        Devolve {"id": str, "achado": dict, "processo": str} para a linha.
+
+        Prioridade: coluna "Processo SEI" da linha; quando ela existe e coincide
+        com o --processo da CLI reaproveitamos a busca ja feita; quando nao ha
+        coluna e nem CLI, abortamos. Nenhum processo e adivinhado.
+        """
+        numero = (item.get("processo") or "").strip()
+        if not numero:
+            if self.id_procedimento_padrao:
+                return {
+                    "id": self.id_procedimento_padrao,
+                    "achado": None,
+                    "processo": self.args.processo or "(da CLI --id-procedimento)",
+                }
+            raise ValueError(
+                "a planilha nao tem 'Processo SEI' e nenhum --processo foi informado"
             )
-        return id_procedimento_padrao
-    if args.processo and processo_item == args.processo:
-        return id_procedimento_padrao
 
-    achado, encontrado = api._localizar_processo_na_caixa(processo_item)
-    if not encontrado:
-        sys.exit(
-            f"ABORTADO no lote (linha {indice}): processo {processo_item} "
-            "nao encontrado na caixa da unidade."
-        )
-    nao_visualizado = bool(achado.get("NaoVisualizado")) or str(
-        achado.get("NaoVisualizado") or ""
-    ).strip().lower() in ("true", "1", "sim", "verdadeiro")
-    if nao_visualizado and not args.mesmo_assim:
-        sys.exit(
-            f"ABORTADO no lote (linha {indice}): processo {processo_item} "
-            "NAO VISUALIZADO. Use --mesmo-assim se tiver certeza."
-        )
-    return achado.get("IdProtocolo") or achado.get("id_procedimento")
+        if numero in self._cache:
+            return self._cache[numero]
+
+        if self.args.processo and numero == self.args.processo and self.id_procedimento_padrao:
+            resultado = {
+                "id": self.id_procedimento_padrao,
+                "achado": None,
+                "processo": numero,
+            }
+            self._cache[numero] = resultado
+            return resultado
+
+        achado, encontrado = self.api._localizar_processo_na_caixa(numero)
+        if not encontrado:
+            resultado = {
+                "id": None,
+                "achado": None,
+                "processo": numero,
+                "erro": f"processo {numero} nao encontrado na caixa da unidade",
+            }
+            self._cache[numero] = resultado
+            return resultado
+
+        resultado = {
+            "id": achado.get("IdProtocolo") or achado.get("id_procedimento"),
+            "achado": achado,
+            "processo": numero,
+        }
+        if _processo_marca_nao_visualizado(achado) and not self.args.mesmo_assim:
+            resultado["erro"] = (
+                f"processo {numero} esta NAO VISUALIZADO - abrir iniciaria prazo; "
+                "use --mesmo-assim se tiver certeza"
+            )
+        self._cache[numero] = resultado
+        return resultado
+
+
+def _preflight_lote(api, itens, args, id_procedimento_padrao=None, somente_plano=False):
+    """
+    Roda ANTES de qualquer gravacao: resolve todos os processos do lote (com
+    cache), aplica a trava de NAO VISUALIZADO e aborta listando tudo que deu
+    errado. Evita o pior cenario do modo lote - gravar 40 documentos e so
+   才发现 que a linha 41 aponta para um processo inexistente.
+
+    Devolve o dicionario {numero_do_item: id_procedimento}.
+    """
+    resolvido = _ResolvedorProcessos(api, args, id_procedimento_padrao)
+    por_id = {}
+    falhas = []
+    usados = {}  # numero do processo -> {"id": str, "linhas": int}
+
+    for item in itens:
+        indice = item["indice"]
+        try:
+            resultado = resolvido.resolver(item)
+        except ValueError as erro:
+            falhas.append(f"linha {indice}: {erro}")
+            continue
+        if resultado.get("erro"):
+            falhas.append(f"linha {indice}: {resultado['erro']}")
+            continue
+        por_id[indice] = resultado["id"]
+        registro = usados.setdefault(resultado["processo"], {"id": resultado["id"], "linhas": 0})
+        registro["linhas"] += 1
+
+    print("\nPRE-VOO: conferindo processos antes de gravar")
+    for numero, registro in usados.items():
+        print(f"  {numero} -> id {registro['id']} ({registro['linhas']} linha(s))")
+    print(f"  {len(usados)} processo(s) distinto(s) no lote.")
+
+    if falhas:
+        print("\nABORTADO no pre-voo - NENHUM documento foi criado:")
+        for linha in falhas:
+            print(f"  - {linha}")
+        sys.exit(1)
+
+    if somente_plano:
+        print("\nPLANO (--plano): nenhuma gravacao sera feita. Resumo:")
+        for item in itens:
+            d = item["dados"]
+            print(
+                f"  linha {item['indice']:>3} | {item['processo'] or '(CLI)'} | "
+                f"id {por_id[item['indice']]} | termo {d.get('Nº do termo', '?')} | "
+                f"{d.get('Nome Servidor', '')}"
+            )
+        print(f"\n{len(itens)} linha(s) prontas. Rode sem --plano para gravar.")
+        return por_id
+
+    return por_id
 
 
 def _selecionar_linhas(itens, args):
@@ -1443,6 +1547,15 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
     print("\nATENCAO: cada linha cria UM documento novo e grava o conteudo mesclado.")
     print("Para retomar apos uma falha: --a-partir-de <indice>.\n")
 
+    # Pre-voo: nenhum documento e criado antes de TODOS os processos serem
+    # resolvidos e validados (incluindo a trava de NAO VISUALIZADO).
+    if getattr(args, "plano", False):
+        _preflight_lote(
+            api, itens, args, id_procedimento_padrao, somente_plano=True
+        )
+        return
+    por_id = _preflight_lote(api, itens, args, id_procedimento_padrao)
+
     concluidas = []
     for posicao, item in enumerate(itens, start=1):
         indice = item["indice"]
@@ -1455,7 +1568,7 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
         )
         print("=" * 78)
 
-        id_procedimento = _resolver_processo_da_linha(api, item, args, id_procedimento_padrao)
+        id_procedimento = por_id[indice]
         try:
             id_doc = api.incluir_documento_interno(
                 id_procedimento=id_procedimento,
@@ -1595,6 +1708,14 @@ def main(argv=None):
         default=None,
         help="Com --lote: indice inicial (para retomar apos uma falha).",
     )
+    parser.add_argument(
+        "--plano",
+        action="store_true",
+        help=(
+            "Com --lote: apenas confere e mostra o plano (processo de cada linha) "
+            "sem criar NENHUM documento."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.linha < 0:
@@ -1610,16 +1731,23 @@ def main(argv=None):
         parser.error("--lote exige gravacao real: remova --dry-run ou processe linha a linha.")
     if args.lote and not args.planilha:
         parser.error("--lote exige --planilha.")
+    if args.plano and not args.lote:
+        parser.error("--plano so faz sentido com --lote.")
     if args.editar_documento:
         if not re.fullmatch(r"\d+", str(args.editar_documento).strip()):
             parser.error("--editar-documento deve conter apenas digitos (ex.: 900000001).")
         if not args.planilha:
             parser.error("--editar-documento exige --planilha (sem planilha nao ha mesclagem).")
 
-    if not args.dry_run and not args.confirmar:
+    if not args.dry_run and not args.confirmar and not (args.lote and args.plano):
         parser.error("A gravacao e real: informe --confirmar (ou use --dry-run para simular.)")
-    if bool(args.id_procedimento) == bool(args.processo):
-        parser.error("Informe --id-procedimento OU --processo (um deles, nao ambos/nenhum.)")
+    # Regra dos argumentos de processo: NUNCA os dois ao mesmo tempo. No --lote
+    # nenhum e obrigatorio, porque cada linha traz o seu em "Processo SEI" e o
+    # pre-voo resolve um a um (com cache).
+    if bool(args.id_procedimento) and bool(args.processo):
+        parser.error("Informe --id-procedimento OU --processo, nunca os dois.")
+    if not args.lote and not args.id_procedimento and not args.processo:
+        parser.error("Informe --id-procedimento OU --processo (um deles, nao nenhum).")
     if args.protocolo_modelo:
         args.protocolo_modelo = args.protocolo_modelo.strip()
         if not re.fullmatch(r"\d+", args.protocolo_modelo):
@@ -1660,13 +1788,7 @@ def main(argv=None):
         for chave in CAMPOS_RESUMO_PROCESSO:
             print(f"    {chave}: {achado.get(chave, '')}")
 
-        nao_visualizado = str(achado.get("NaoVisualizado") or "").strip().lower() in (
-            "true",
-            "1",
-            "sim",
-            "verdadeiro",
-        ) or bool(achado.get("NaoVisualizado"))
-        if nao_visualizado and not args.mesmo_assim:
+        if _processo_marca_nao_visualizado(achado) and not args.mesmo_assim:
             sys.exit(
                 "ABORTADO: processo NAO VISUALIZADO - operacao de prazo sensivel. "
                 "Se tiver certeza, rode com --mesmo-assim."

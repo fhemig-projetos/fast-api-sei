@@ -180,6 +180,7 @@ venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" --unid
 | `--lote` | off | Cria um documento **por linha** da planilha e mescla em cada um |
 | `--a-partir-de N` | — | Com `--lote`: índice inicial (**retomada** após falha) |
 | `--ate-linha N` | — | Com `--lote`: índice final do lote |
+| `--plano` | off | Com `--lote`: só mostra o plano (processo de cada linha), **sem gravar nada** |
 
 ### Séries usadas na prática
 
@@ -261,12 +262,27 @@ venv\Scripts\python app4_inclusao.py --processo "0000.00.0000000/0000-00" \
 # Documento já existente (pula a criação)
 ... --confirmar --planilha --editar-documento 900000001
 
+# Simular o lote inteiro (não grava nada, não pede --confirmar)
+... --planilha --lote --plano
+
 # Lote: um documento por linha da planilha
 ... --confirmar --planilha --lote
 
 # Retomar após uma falha
 ... --confirmar --planilha --lote --a-partir-de 7
 ```
+
+### Lote com um processo diferente por linha
+
+Cada linha da planilha segue o processo da **coluna `Processo SEI`**: o lote
+descobre o `id_procedimento` de cada número, cria o documento lá e aplica o
+Mail Merge naquele processo. Com `--lote` o `--processo`/`--id-procedimento`
+da CLI é **opcional** (use apenas como padrão para linhas sem a coluna).
+
+Antes de gravar qualquer documento, o **pré-voo** resolve todos os processos
+(com cache: 100 linhas do mesmo processo = 1 busca na caixa), verifica a trava
+de **NÃO VISUALIZADO** em todos e aborta listando *todos* os problemas de uma
+vez. Assim, um erro na linha 41 não deixa 40 documentos órfãos para trás.
 
 > **`--lote` é fail-fast**: para no primeiro erro e imprime a linha exata para
 > retomar com `--a-partir-de`. Cada linha cria **um** documento novo — o fluxo

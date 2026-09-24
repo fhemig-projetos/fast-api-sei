@@ -168,5 +168,156 @@ api.trocar_unidade()
 print("LINK_URL:", api.url_do_get)
 assert api.url_do_get and hash_b in api.url_do_get, "deveria usar o link da tela"
 
+# 7) PRE-VOO multi-processo: cada linha segue o processo da PRÓPRIA planilha.
+#    Tudo offline: _FakeCaixa conta as buscas e _FakeLoteAPI conta as criacoes.
+import argparse  # noqa: E402
+
+from app4_inclusao import (  # noqa: E402
+    _preflight_lote,
+    _processo_marca_nao_visualizado,
+    _ResolvedorProcessos,
+)
+
+
+def _item(indice, processo):
+    return {
+        "indice": indice,
+        "dados": {"Nome Servidor": f"SERVIDOR {indice}", "Nº do termo": str(indice + 1)},
+        "processo": processo,
+    }
+
+
+class _FakeCaixa:
+    """Caixa falsa: mapeia numero -> id e NAO.Visualizado, contando as buscas."""
+
+    def __init__(self, mapa, nao_visualizados=()):
+        self.mapa = mapa
+        self.nao_visualizados = set(nao_visualizados)
+        self.buscas = []
+
+    def _localizar_processo_na_caixa(self, numero):
+        self.buscas.append(numero)
+        if numero not in self.mapa:
+            return None, False
+        achado = {
+            "IdProtocolo": self.mapa[numero],
+            "NaoVisualizado": numero in self.nao_visualizados,
+        }
+        return achado, True
+
+
+class _FakeLoteAPI(_FakeCaixa):
+    """Acrescenta contadores de criacao/edicao (devem permanecer 0 no pre-voo)."""
+
+    def __init__(self, mapa, nao_visualizados=()):
+        super().__init__(mapa, nao_visualizados)
+        self.criados = 0
+        self.editados = 0
+
+    def incluir_documento_interno(self, **kwargs):
+        self.criados += 1
+        return "900000099"
+
+    def editar_conteudo_documento(self, *args, **kwargs):
+        self.editados += 1
+        return True
+
+
+def _args_lote(**overrides):
+    base = dict(
+        processo=None,
+        mesmo_assim=False,
+        linha=0,
+        ate_linha=None,
+        a_partir_de=None,
+        lote=True,
+        plano=False,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+P_A = "1000.01.0000001/2026-11"
+P_B = "1000.01.0000002/2026-22"
+P_C = "1000.01.0000003/2026-33"
+
+# 7a) CACHE: 5 linhas em 2 processos distintos -> 2 buscas, nao 5.
+api = _FakeLoteAPI({P_A: "900000001", P_B: "900000002"})
+itens = [_item(0, P_A), _item(1, P_B), _item(2, P_A), _item(3, P_B), _item(4, P_A)]
+por_id = _preflight_lote(api, itens, _args_lote())
+print("CACHE_BUSCAS:", api.buscas)
+assert api.buscas == [P_A, P_B], f"esperava 2 buscas em cache, veio {api.buscas}"
+assert por_id[0] == "900000001" and por_id[1] == "900000002"
+assert por_id[4] == "900000001", "linhas do mesmo processo devem reaproveitar o id"
+assert api.criados == 0 and api.editados == 0, "pre-voo nao pode criar/editar nada"
+
+# 7b) PROCESSO INEXISTENTE: aborta ANTES de qualquer criacao (todos os erros juntos).
+api = _FakeLoteAPI({P_A: "900000001"})
+itens = [_item(0, P_A), _item(1, P_C), _item(2, "1000.01.9999999/2026-99")]
+try:
+    _preflight_lote(api, itens, _args_lote())
+except SystemExit as erro:
+    assert erro.code == 1, f"deveria sair com codigo 1, saiu {erro.code}"
+    print("PRE_VOO_ABORTOU_COMO_ESPERADO")
+else:
+    raise AssertionError("pre-voo deveria abortar com processo inexistente")
+assert api.criados == 0, "NENHUM documento pode ter sido criado antes do abort"
+
+# 7c) REGRA DE OURO 1: processo NAO VISUALIZADO aborta sem --mesmo-assim.
+api = _FakeLoteAPI({P_A: "900000001", P_B: "900000002"}, nao_visualizados=[P_B])
+itens = [_item(0, P_A), _item(1, P_B)]
+try:
+    _preflight_lote(api, itens, _args_lote())
+except SystemExit as erro:
+    assert erro.code == 1
+    print("NAO_VISUALIZADO_BLOQUEOU_O_LOTE")
+else:
+    raise AssertionError("NAO VISUALIZADO deveria abortar sem --mesmo-assim")
+assert api.criados == 0
+
+# 7d) --mesmo-assim: o mesmo processo NAO VISUALIZADO passa (decisao explicita).
+api = _FakeLoteAPI({P_A: "900000001"}, nao_visualizados=[P_A])
+por_id = _preflight_lote(api, [_item(0, P_A)], _args_lote(mesmo_assim=True))
+assert por_id[0] == "900000001"
+print("MESMO_ASSIM_PERMITIU:", por_id[0])
+
+# 7e) Sem coluna "Processo SEI" e sem --processo -> erro claro, sem inventar.
+api = _FakeLoteAPI({})
+try:
+    _preflight_lote(api, [_item(0, "")], _args_lote())
+except SystemExit as erro:
+    assert erro.code == 1
+    print("SEM_PROCESSO_ABORTOU_COMO_ESPERADO")
+else:
+    raise AssertionError("sem processo na planilha e sem CLI deveria abortar")
+assert api.buscas == [], "nao deveria procurar nada quando falta o numero"
+
+# 7f) --processo da CLI como fallback para linhas SEM "Processo SEI".
+api = _FakeLoteAPI({P_A: "900000001"})
+por_id = _preflight_lote(
+    api, [_item(0, ""), _item(1, "")], _args_lote(processo=P_A), "900000001"
+)
+assert por_id[0] == "900000001" and por_id[1] == "900000001"
+assert api.buscas == [], "com --processo na CLI nao deve raspar a caixa de novo"
+
+# 7g) --plano: imprime o plano e NAO grava nada.
+api = _FakeLoteAPI({P_A: "900000001", P_B: "900000002"})
+itens = [_item(0, P_A), _item(1, P_B)]
+_preflight_lote(api, itens, _args_lote(plano=True), somente_plano=True)
+assert api.criados == 0 and api.editados == 0
+print("PLANO_NAO_GRAVOU_NADA")
+
+# 7h) Guarda da regra de ouro 1: variantes de "NaoVisualizado".
+for valor, esperado in [
+    (True, True), (False, False), (None, False), ("", False),
+    ("true", True), ("TRUE", True), ("1", True), ("sim", True),
+    ("verdadeiro", True), ("S", True), ("false", False), ("nao", False),
+]:
+    obtido = _processo_marca_nao_visualizado({"NaoVisualizado": valor})
+    assert obtido is esperado, f"NaoVisualizado={valor!r}: {obtido} != {esperado}"
+assert _processo_marca_nao_visualizado(None) is False
+assert _processo_marca_nao_visualizado({}) is False
+print("GUARDA_NAO_VISUALIZADO_OK")
+
 print("TODOS_OS_TESTES_OFFLINE_PASSARAM")
 
