@@ -401,12 +401,23 @@ class APIExtratorSEI:
 
         url_dinamica = self._link_trocar_unidade(self.html_home)
         if not url_dinamica:
-            print("  Nao encontrei o link de troca; usando URL de fallback (pode expirar).")
+            # Regra de ouro: nunca chutar um infra_hash. Sem o link na tela inicial
+            # nao existe hash legitimo - usamos o de qualquer link da propria pagina
+            # (GET -> extrair -> usar) e, se nem isso existir, falhamos explicitamente
+            # em vez de enviar uma requisicao com token invalido.
+            m_hash = re.search(r"infra_hash=([0-9a-f]{32,})", self.html_home or "")
+            if not m_hash:
+                print(
+                    "  Nao encontrei o link de troca nem um infra_hash na tela inicial; "
+                    "a troca de unidade nao pode ser feita com seguranca."
+                )
+                return False
+            print("  Link de troca ausente; usando o infra_hash lido da tela inicial.")
             url_dinamica = (
                 "controlador.php?acao=infra_trocar_unidade&"
                 "acao_origem=infra_trocar_unidade&infra_sistema=100000100&"
-                "infra_unidade_atual=110007141&"
-                "infra_hash=c9e91b2dc924e6ed02cb49ce1a4a58fcf4cfbd3d49a4960b9ed924f1a"
+                f"infra_unidade_atual={self.unidade_atual or UNIDADE_ALVO}&"
+                f"infra_hash={m_hash.group(1)}"
             )
 
         if not url_dinamica.startswith("http"):

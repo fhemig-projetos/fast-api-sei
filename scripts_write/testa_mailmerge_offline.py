@@ -107,4 +107,66 @@ assert "&amp;" not in url_conf, f"URL com &amp; escapado: {url_conf}"
 # Id de outro documento nao pode ser aceito (evita editar o documento errado).
 assert C._link_ajax_editor(resp, "corfirmacao_atualizacao_documento", "999999999") == ""
 
+# 6) Regra de ouro: a troca de unidade NUNCA pode chutar um infra_hash.
+#    Exercitamos o fallback do app3 sem tocar na rede (classe fake).
+from scripts_read.app3 import APIExtratorSEI  # noqa: E402
+
+HASH_TELA = "a" * 64
+
+
+class _FakeAPI(APIExtratorSEI):
+    """APIExtratorSEI sem rede: registra a URL que teria sido chamada."""
+
+    def __init__(self, html_home):
+        self.html_home = html_home
+        # Unidade atual DIFERENTE do alvo: caso contrario trocar_unidade() retorna
+        # cedo ("ja estamos na unidade alvo") e o fallback nem seria exercitado.
+        self.unidade_atual = "999999999"
+        self.unidade_alvo = "110007141"
+        self.urls_chamadas = []
+
+    def _requisicao_segura(self, metodo, url, **kwargs):
+        self.urls_chamadas.append((metodo, url))
+        return type("R", (), {"text": "<html></html>", "status_code": 200})()
+
+    def _montar_payload_troca(self, html, unidade):
+        return "form-action", {"x": "1"}
+
+    @property
+    def url_chamada(self):
+        """Ultima URL chamada (o POST do formulario vem por ultimo)."""
+        return self.urls_chamadas[-1][1] if self.urls_chamadas else None
+
+    @property
+    def url_do_get(self):
+        """URL da primeira chamada, isto e, a tela de troca construida."""
+        return self.urls_chamadas[0][1] if self.urls_chamadas else None
+
+
+# 6a) Tela SEM link de troca, mas COM hash -> usa o hash da tela (nunca um fixo)
+html_sem_link = f'<html><a href="x?acao=principal&infra_hash={HASH_TELA}">p</a></html>'
+api = _FakeAPI(html_sem_link)
+api.trocar_unidade()
+print("FALLBACK_URL:", api.url_do_get)
+assert api.url_do_get and HASH_TELA in api.url_do_get, "deveria usar o hash da tela"
+assert "infra_trocar_unidade" in api.url_do_get and "acao=infra_trocar_unidade" in api.url_do_get
+
+# 6b) Tela SEM link e SEM hash -> falha explicita, sem requisicao inventada
+api = _FakeAPI("<html><body>sem links</body></html>")
+assert api.trocar_unidade() is False, "sem hash deve retornar False"
+assert api.url_chamada is None, "nao deve chamar a rede sem hash legitimo"
+print("SEM_HASH: falhou como esperado, sem chamar a rede")
+
+# 6c) Tela COM o link de troca -> usa o link original (caminho feliz)
+hash_b = "b" * 64
+html_com_link = (
+    "<html><a id='lnkInfraUnidade' onclick=\"window.location.href='"
+    "controlador.php?acao=infra_trocar_unidade&infra_hash=" + hash_b + "'\">u</a></html>"
+)
+api = _FakeAPI(html_com_link)
+api.trocar_unidade()
+print("LINK_URL:", api.url_do_get)
+assert api.url_do_get and hash_b in api.url_do_get, "deveria usar o link da tela"
+
 print("TODOS_OS_TESTES_OFFLINE_PASSARAM")
+

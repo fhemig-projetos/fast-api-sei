@@ -63,14 +63,19 @@ class APIExtratorSEI:
 
     def trocar_unidade(self):
         print("🔄 Solicitando troca para a unidade alvo (110007141)...")
-        
+
+        # AVISO DIDATICO (nao copie para producao): este script e a versao ANTIGA
+        # do projeto e usa um infra_hash FIXO no lugar de extrai-lo da tela. E
+        # exatamente o que a regra de ouro proibe - o hash pertence a uma sessao
+        # especifica e morre. Serve apenas para estudar o fluxo. O app3.py (leitura)
+        # e o app4_inclusao.py (escrita) extraem o hash da tela.
         url_troca = (
             "https://www.sei.mg.gov.br/sei/controlador.php?"
             "acao=infra_trocar_unidade&"
             "acao_origem=infra_trocar_unidade&"
             "infra_sistema=100000100&"
             "infra_unidade_atual=110007141&"
-            "infra_hash=c9e91b2dc924e6ed02cb49ce1a4a58fcf4cfbd3d49a4960b9ed924f1a"
+            "infra_hash=HASH_DIDATICO_NAO_FUNCIONA_FORA_DESTA_SESSAO"
         )
         
         payload = {
