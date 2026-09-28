@@ -478,6 +478,39 @@ A tela tem uma faixa avisando em que modo esta. A constante `SIMULAR`, no topo d
 > dentro de cada processo ao final. Para voltar a simular, ponha `True` e rode
 > `build_exe.bat` de novo.
 
+### Incluir em blocos de assinatura
+
+A tela tem **dois campos de bloco** (Bloco 1 e Bloco 2). Depois do mail merge,
+cada documento criado entra nos dois blocos e e **disponibilizado** para
+assinatura (o botao "Incluir e Disponibilizar" do SEI).
+
+O valor e o **ID interno** do bloco - o numero que aparece no `value` da opcao
+na tela do SEI (ex.: `7712033`), e nao o texto do bloco. Deixe vazio para nao
+incluir em um deles.
+
+A tela tem **dois botoes**, porque sao duas acoes diferentes do SEI:
+
+- **So incluir no bloco** - coloca o documento no bloco e para. Nao exige
+  assinante.
+- **Incluir e disponibilizar** - tambem envia para assinatura. **So funciona se o
+  bloco tiver unidades configuradas**; caso contrario o SEI recusa com
+  "Bloco X nao possui unidades configuradas para disponibilizacao" e o programa
+  mostra o aviso e para.
+
+Se o ID digitado nao existir no processo, o programa **aborta antes de enviar
+qualquer coisa** e mostra a lista de blocos que existem - assim o documento nao
+corre o risco de ir para o bloco errado.
+
+O programa **nao** trata "HTTP 200" como prova de que entrou: o SEI responde 200
+mesmo quando recusa, com o aviso na tela. A confer�
+cao e feita nos alertas da resposta.
+
+```bash
+# pela linha de comando
+venv\Scripts\python app4_inclusao.py --lote --planilha "planilha.xlsx" \
+  --confirmar --bloco1 7712033 --bloco2 7708937
+```
+
 ### Onde ficam os logs
 
 Os logs de auditoria contem IDs de processo e sao gravados em

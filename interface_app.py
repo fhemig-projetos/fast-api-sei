@@ -71,6 +71,27 @@ from tkinter import TclError, filedialog, messagebox
 # True novamente.
 SIMULAR = False
 
+# Grava o HTML de cada etapa em ruas_inclusao/ (so diagnostico). False = nao
+# deixa arquivos no disco do usuario; ligue True se algo falhar e precisar
+# ver a tela que o SEI devolveu.
+SALVAR_TELAS = False
+
+# Modos possiveis do botao do bloco. "Incluir e disponibilizar" so funciona
+# se o bloco tiver unidades/assinantes configurados no SEI; sem isso o SEI
+# recusa. "So incluir" nao exige assinante.
+# Paleta unica dos botoes (mesma do tema "blue" do customtkinter), para
+# a tela nao misturar cores: AZUL_CLARO e o estado normal, AZUL_ESCURO o
+# estado quando o botao esta escolhido, e AZUL_APAGADO o nao escolhido.
+AZUL_CLARO = "#3B8ED0"
+AZUL_ESCURO = "#1F6AA5"
+AZUL_APAGADO = "#2E5F84"
+HOVER_CLARO = "#36719F"
+HOVER_ESCURO = "#144870"
+HOVER_APAGADO = "#25506E"
+
+MODO_INCLUIR = "incluir"
+MODO_DISPONIBILIZAR = "disponibilizar"
+
 SERIE = "4110"                      # tipo: Cessao Especial Onus Cedente
 PROTOCOLO_MODELO = "148410511"      # protocolo do "Documento Modelo"
 UNIDADE = "110031457"               # unidade onde os processos estao
@@ -79,7 +100,7 @@ TEXTO_INICIAL = "D"                 # D = usa o Documento Modelo
 
 # Etiquetas da interface
 TITULO = "Inclusão Automatizada de Documentos SEI"
-LARGURA, ALTURA = 820, 800
+LARGURA, ALTURA = 820, 1040
 
 # =============================================================================
 #  Onde ficam os logs (LGPD)
@@ -187,7 +208,9 @@ class RedirecionadorConsole:
 # =============================================================================
 
 
-def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False):
+def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
+                     bloco1: str = "", bloco2: str = "",
+                     modo: str = MODO_DISPONIBILIZAR):
     """
     Monta o argparse.Namespace que o executar_lote() do app4_inclusao.py espera.
 
@@ -218,6 +241,11 @@ def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False):
         sem_consultar_modelo=False,
         unidade=UNIDADE,
         salvar_telas=False,
+        # Blocos de assinatura: IDs internos lidos da tela. Vazio = nao incluir.
+        bloco1=(bloco1 or "").strip(),
+        bloco2=(bloco2 or "").strip(),
+        # botao do SEI usado na confirmacao (ver _secao_bloco).
+        disponibilizar_bloco=(modo == MODO_DISPONIBILIZAR),
     )
 
 
@@ -251,6 +279,8 @@ class AppAutomacaoSEI(ctk.CTk):
         # Estado
         self.caminho_planilha = ""
         self.bloco_assinatura = ""
+        self.bloco_assinatura2 = ""
+        self.modo_bloco = MODO_DISPONIBILIZAR
         self.executando = False
         self._api = None
         self._caminho_logs = None
@@ -317,6 +347,7 @@ class AppAutomacaoSEI(ctk.CTk):
 
         self.botao_planilha = ctk.CTkButton(
             linha, text="Selecionar Planilha Excel", width=210, height=34,
+            fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
             command=self.selecionar_planilha,
         )
         self.botao_planilha.grid(row=0, column=0, padx=(0, 10), sticky="w")
@@ -336,17 +367,87 @@ class AppAutomacaoSEI(ctk.CTk):
         quadro.grid_columnconfigure(1, weight=1)
 
         rotulo = ctk.CTkLabel(
-            quadro, text="Bloco de Assinatura:", font=ctk.CTkFont(weight="bold")
+            quadro, text="Bloco 1:", font=ctk.CTkFont(weight="bold")
         )
-        rotulo.grid(row=0, column=0, padx=(14, 8), pady=12, sticky="w")
-        self.entrada_bloco = ctk.CTkEntry(
-            quadro, placeholder_text="Numero do Bloco de Assinatura"
+        rotulo.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
+        self.entrada_bloco = ctk.CTkEntry(quadro, placeholder_text="ID do Bloco 1")
+        self.entrada_bloco.grid(row=0, column=1, padx=(0, 14), pady=(12, 6), sticky="ew")
+
+        rotulo = ctk.CTkLabel(
+            quadro, text="Bloco 2:", font=ctk.CTkFont(weight="bold")
         )
-        self.entrada_bloco.grid(row=0, column=1, padx=(0, 14), pady=12, sticky="ew")
-        # O numero do bloco e guardado para a proxima etapa da automacao; hoje
-        # nao altera o documento (nao ha campo correspondente no SEI ainda).
-        self.entrada_bloco.bind("<Return>", lambda _e: self._registrar_bloco())
-        self.entrada_bloco.bind("<FocusOut>", lambda _e: self._registrar_bloco())
+        rotulo.grid(row=1, column=0, padx=(14, 8), pady=(0, 8), sticky="w")
+        self.entrada_bloco2 = ctk.CTkEntry(quadro, placeholder_text="ID do Bloco 2")
+        self.entrada_bloco2.grid(row=1, column=1, padx=(0, 14), pady=(0, 8), sticky="ew")
+
+        # O valor e o ID interno do bloco (o "value" da opcao na tela do SEI,
+        # ex.: 7712033), nao o numero de exibicao. O backend confere contra a
+        # lista real do processo e aborta se o numero nao existir - por isso o
+        # campo e livre, mas o erro mostra o que existe.
+        dica = ctk.CTkLabel(
+            quadro,
+            text="ID interno do bloco, como aparece na tela do SEI. "
+                 "Deixe vazio para nao incluir.",
+            anchor="w", font=ctk.CTkFont(size=11),
+        )
+        dica.grid(row=2, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
+
+        for entrada in (self.entrada_bloco, self.entrada_bloco2):
+            entrada.bind("<Return>", lambda _e: self._registrar_bloco())
+            entrada.bind("<FocusOut>", lambda _e: self._registrar_bloco())
+
+        # Dois botoes porque sao duas acoes diferentes do SEI: "Incluir" so
+        # coloca o documento no bloco; "Incluir e disponibilizar" tambem envia
+        # para assinatura e REQUER que o bloco tenha unidades configuradas.
+        acoes = ctk.CTkFrame(quadro, fg_color="transparent")
+        acoes.grid(row=3, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="ew")
+        acoes.grid_columnconfigure((0, 1), weight=1)
+        self.botao_incluir = ctk.CTkButton(
+            acoes,
+            text="Incluir documento",
+            command=lambda: self._escolher_modo(MODO_INCLUIR),
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self.botao_incluir.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        self.botao_disponibilizar = ctk.CTkButton(
+            acoes,
+            text="Incluir e disponibilizar",
+            command=lambda: self._escolher_modo(MODO_DISPONIBILIZAR),
+            font=ctk.CTkFont(weight="bold"),
+            fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
+        )
+        self.botao_disponibilizar.grid(row=0, column=1, padx=(5, 0), sticky="ew")
+        self.modo_bloco = MODO_DISPONIBILIZAR
+        self._pintar_modo()
+
+    def _escolher_modo(self, modo):
+        """Escolhe o botao do bloco e guarda a opcao para a thread."""
+        self.modo_bloco = modo
+        self._pintar_modo()
+        self.log.log(
+            "Modo do bloco: "
+            + ("incluir e disponibilizar" if modo == MODO_DISPONIBILIZAR
+               else "so incluir (nao precisa de assinante)")
+        )
+
+    def _pintar_modo(self):
+        """Destaca o botao escolhido, para nao haver duvida na hora de gravar."""
+        escolhido, outro = (
+            (self.botao_disponibilizar, self.botao_incluir)
+            if self.modo_bloco == MODO_DISPONIBILIZAR
+            else (self.botao_incluir, self.botao_disponibilizar)
+        )
+        escolhido.configure(
+            fg_color=AZUL_ESCURO,
+            hover_color=HOVER_ESCURO,
+            border_width=3,
+            border_color=AZUL_CLARO,
+        )
+        outro.configure(
+            fg_color=AZUL_APAGADO,
+            hover_color=HOVER_APAGADO,
+            border_width=0,
+        )
 
     def _secao_console(self):
         self.console = ctk.CTkTextbox(self, wrap="word", activate_scrollbars=True)
@@ -379,15 +480,33 @@ class AppAutomacaoSEI(ctk.CTk):
             text="Iniciar Automacao",
             height=52,
             font=ctk.CTkFont(size=18, weight="bold"),
-            hover_color="#1f6aa5",
+            fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
             command=self.iniciar_automacao,
         )
         self.botao_iniciar.grid(row=7, column=0, padx=24, pady=(0, 24), sticky="ew")
 
     def _registrar_bloco(self):
-        """Guarda o numero do bloco para a proxima etapa da automacao."""
-        self.bloco_assinatura = self.entrada_bloco.get().strip()
-        return self.bloco_assinatura
+        """
+        Le os dois IDs de bloco de assinatura da tela.
+
+        Devolve (bloco1, bloco2). Se os dois forem iguais, o proprio SEI nao
+        aceitaria a segunda inclusao, entao avisamos e devolvemos (vazio) para
+        a execucao nao partir com um erro la no fim do lote.
+        """
+        bloco1 = self.entrada_bloco.get().strip()
+        bloco2 = self.entrada_bloco2.get().strip()
+        if bloco1 and bloco1 == bloco2:
+            self.log.log(f"ERRO: os dois blocos informedos sao iguais ({bloco1}).")
+            messagebox.showwarning(
+                "Bloco de assinatura",
+                f"Os dois blocos informedos sao o mesmo ({bloco1}).\n\n"
+                "Informe dois blocos diferentes, ou deixe o segundo vazio.",
+                parent=self,
+            )
+            return "", ""
+        self.bloco_assinatura = bloco1
+        self.bloco_assinatura2 = bloco2
+        return bloco1, bloco2
 
     # ------------------------------------------------------------- credenciais
     def _obter_credenciais(self):
@@ -468,7 +587,12 @@ class AppAutomacaoSEI(ctk.CTk):
             return  # o aviso ja foi mostrado dentro de _obter_credenciais
         usuario, senha = credencial
 
-        bloco = self._registrar_bloco()
+        bloco1, bloco2 = self._registrar_bloco()
+        acao_bloco = (
+            "incluir e disponibilizar"
+            if self.modo_bloco == MODO_DISPONIBILIZAR
+            else "so incluir (sem disponibilizar)"
+        )
 
         # Confirmacao explicita: e o equivalente ao --confirmar da linha de
         # comando. Sem este "ok" nada e gravado no SEI.
@@ -477,7 +601,7 @@ class AppAutomacaoSEI(ctk.CTk):
                 f"MODO SIMULACAO - nada sera criado no SEI.\n\n"
                 f"Usuario: {usuario}\n"
                 f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
-                f"Bloco de assinatura: {bloco or '(nao informado)'}\n\n"
+                f"Bloco 1: {bloco1 or '(nao informado)'}  |  Bloco 2: {bloco2 or '(nao informado)'}\n\n"
                 "Vai entrar no SEI, ler a planilha e conferir os processos.\n"
                 "Quer rodar a simulacao?"
             )
@@ -485,7 +609,9 @@ class AppAutomacaoSEI(ctk.CTk):
             pergunta = (
                 f"Vai criar documentos no SEI usando o usuario:\n\n    {usuario}\n\n"
                 f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
-                f"Bloco de assinatura: {bloco or '(nao informado)'}\n\n"
+                f"Bloco 1: {bloco1 or '(nao informado)'}  |  "
+                f"Bloco 2: {bloco2 or '(nao informado)'}\n"
+                f"Acao no bloco: {acao_bloco}\n\n"
                 "Cada linha da planilha cria UM documento, no SEU nome. Confirma?"
             )
         if not messagebox.askyesno("Confirmar", pergunta, parent=self):
@@ -495,7 +621,8 @@ class AppAutomacaoSEI(ctk.CTk):
         self.executando = True
         for widget in (self.botao_iniciar, self.botao_planilha,
                        self.entrada_usuario, self.entrada_senha,
-                       self.entrada_bloco):
+                       self.entrada_bloco, self.entrada_bloco2,
+                       self.botao_incluir, self.botao_disponibilizar):
             widget.configure(state="disabled")
         self.botao_iniciar.configure(text="Executando...")
 
@@ -503,7 +630,10 @@ class AppAutomacaoSEI(ctk.CTk):
         # processo do Python. O log avisa que o lote pode ficar incompleto.
         thread = threading.Thread(
             target=self._thread_automacao,
-            args=(usuario, senha, self.caminho_planilha, bloco),
+            args=(
+                usuario, senha, self.caminho_planilha, bloco1, bloco2,
+                self.modo_bloco,
+            ),
             daemon=True,
         )
         thread.start()
@@ -528,7 +658,9 @@ class AppAutomacaoSEI(ctk.CTk):
         os.environ["SEI_USUARIO"] = usuario
         os.environ["SEI_SENHA"] = senha
 
-    def _thread_automacao(self, usuario, senha, planilha, bloco):
+    def _thread_automacao(
+        self, usuario, senha, planilha, bloco1, bloco2, modo_bloco
+    ):
         """
         Roda FORA da thread principal. Tudo que precisar da interface volta
         por self.after(...), e a escrita no console passa pelo Redirecionador.
@@ -539,7 +671,15 @@ class AppAutomacaoSEI(ctk.CTk):
             self.log.log("=" * 66)
             self.log.log(f"Usuario SEI: {usuario}")
             self.log.log(f"Planilha   : {planilha}")
-            self.log.log(f"Bloco assinatura: {bloco or '(nao informado)'}")
+            self.log.log(
+                f"Bloco 1: {bloco1 or '(nao informado)'}  |  "
+                f"Bloco 2: {bloco2 or '(nao informado)'}"
+            )
+            self.log.log(
+                "Acao no bloco: "
+                + ("incluir e disponibilizar" if modo_bloco == MODO_DISPONIBILIZAR
+                   else "so incluir")
+            )
             self.log.log("=" * 66)
 
             # LGPD: os logs de auditoria do backend contem IDs de processo.
@@ -572,13 +712,16 @@ class AppAutomacaoSEI(ctk.CTk):
             # As credenciais vao EXPLICITAS no construtor - e isto que
             # realmente autentica, independentemente de qualquer arquivo.
             api = InclusaoDocumentoSEI(usuario, senha, unidade_alvo=UNIDADE)
-            api.salvar_telas = False
+            api.salvar_telas = SALVAR_TELAS
             self._api = api
             if not api.autenticar():
                 raise RuntimeError("Falha no login. Verifique usuario e senha.")
             api.trocar_unidade()
 
-            args = montar_args_lote(planilha, plano=SIMULAR)
+            args = montar_args_lote(
+                planilha, plano=SIMULAR, bloco1=bloco1, bloco2=bloco2,
+                modo=modo_bloco,
+            )
             executar_lote(api, args, None, TEXTO_INICIAL)
             if SIMULAR:
                 # Nenhum documento foi criado nem editado acima; o console
@@ -622,7 +765,8 @@ class AppAutomacaoSEI(ctk.CTk):
         self.botao_iniciar.configure(text="Iniciar Automacao")
         for widget in (self.botao_iniciar, self.botao_planilha,
                        self.entrada_usuario, self.entrada_senha,
-                       self.entrada_bloco):
+                       self.entrada_bloco, self.entrada_bloco2,
+                       self.botao_incluir, self.botao_disponibilizar):
             widget.configure(state="normal")
         self.log.log("-" * 66)
 
