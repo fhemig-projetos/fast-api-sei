@@ -36,3 +36,12 @@ outputs/
 
 # Dumps de diagnostico do fluxo de escrita
 payload_gerar.json
+
+# Artefatos do PyInstaller (build do executavel)
+build/
+dist/
+*.spec
+
+# Credenciais salvas pela interface (ficam em %APPDATA%, nunca aqui)
+credenciais.dat
+*.dat

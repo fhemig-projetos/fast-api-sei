@@ -428,3 +428,52 @@ relativos.
   acesso conforme a hipótese legal informada e sem texto (`--texto-inicial N`) —
   ou a partir de um **Documento Modelo**, quando `--protocolo-modelo` é usado.
 
+---
+
+## Interface grafica (GUI) e executavel
+
+Para quem nao abre terminal: `interface_app.py` e a tela em CustomTkinter. Ela
+pede a planilha, o numero do Bloco de Assinatura e o **proprio login do SEI**,
+roda a automacao em uma thread separada (a janela nunca congela) e mostra tudo
+em tempo real no console inferior.
+
+```bash
+# Rodar direto do Python (desenvolvimento)
+venv/Scripts/python interface_app.py
+
+# Gerar o executavel unico (leva 1 a 3 minutos)
+build_exe.bat
+```
+
+O executavel sai em `dist/AutomacaoSEI.exe` e **nao precisa de Python
+instalado** no PC de quem usa.
+
+### Cada usuario usa o proprio login
+
+A tela **nao** le o `.env` e **nao** embute credencial no `.exe`. Se voce marcar
+"Lembrar neste PC", usuario e senha ficam cifrados com **CryptProtectData
+(DPAPI do proprio Windows)** em
+`%APPDATA%\\AutomacaoSEI\\credenciais.dat`: so abrem para o usuario do
+Windows que gravou, naquele computador. O botao "Limpar" apaga.
+
+> **Nunca distribua a pasta `venv/` nem o arquivo `.env` do projeto** - envie
+> apenas o `dist/AutomacaoSEI.exe`.
+
+### Se o executavel reclamar de `No module named 'tkinter'`
+
+Num venv do Windows a pasta `tcl8.6` costuma faltar, e sem ela o PyInstaller
+deixa o tkinter **fora** do `.exe`. O `build_exe.bat` ja copia a pasta do
+Python base para dentro do `venv` e **testa a abertura da janela antes de
+compilar** (se falhar, ele para em vez de gerar um .exe quebrado). Para
+corrigir manualmente:
+
+```bash
+cp -r "<python-base>/tcl" venv/tcl
+venv/Scripts/python -c "import tkinter; tkinter.Tk().destroy()"
+```
+
+### Testes offline
+
+```bash
+python scripts_write/testa_interface_gui.py   # GUI, Namespace e credenciais
+```
