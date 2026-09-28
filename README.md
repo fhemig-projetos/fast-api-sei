@@ -490,6 +490,10 @@ incluir em um deles.
 
 A tela tem **dois botoes**, porque sao duas acoes diferentes do SEI:
 
+- **Nao incluir em bloco de assinatura** - cria e mescla o documento, mas
+  **nao entra em nenhum bloco**. Os campos de bloco ficam cinzas e travados,
+  e o console avisa que o documento ficou sem bloco. Util quando o bloco for
+  configurado depois, na mao, no SEI.
 - **So incluir no bloco** - coloca o documento no bloco e para. Nao exige
   assinante.
 - **Incluir e disponibilizar** - tambem envia para assinatura. **So funciona se o

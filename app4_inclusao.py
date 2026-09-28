@@ -1803,6 +1803,11 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
         f"Blocos de assinatura: "
         f"1={bloco1 or '(nao informado)'} | 2={bloco2 or '(nao informado)'}"
     )
+    if not (bloco1 or bloco2):
+        print(
+            "  -> Nenhum bloco informado: os documentos serao criados e "
+            "mesclados, mas NAO entram em bloco de assinatura."
+        )
 
     print(f"\nMODO LOTE: {len(itens)} linha(s) de {os.path.basename(caminho)}")
     print(f"  Intervalo: indice {itens[0]['indice']} .. {itens[-1]['indice']}")

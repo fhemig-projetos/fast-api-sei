@@ -88,7 +88,12 @@ AZUL_APAGADO = "#2E5F84"
 HOVER_CLARO = "#36719F"
 HOVER_ESCURO = "#144870"
 HOVER_APAGADO = "#25506E"
+GRAY_APAGADO = "#6B7785"
+TEXTO_PADRAO = "#DCE4EE"  # cor normal de texto no tema escuro
 
+# Terceiro caminho: cria e mescla o documento, mas NAO entra em bloco
+# nenhum - util quando o bloco e configurado depois, na mao, no SEI.
+MODO_SEM_BLOCO = "sem_bloco"
 MODO_INCLUIR = "incluir"
 MODO_DISPONIBILIZAR = "disponibilizar"
 
@@ -100,7 +105,7 @@ TEXTO_INICIAL = "D"                 # D = usa o Documento Modelo
 
 # Etiquetas da interface
 TITULO = "Inclusão Automatizada de Documentos SEI"
-LARGURA, ALTURA = 820, 1040
+LARGURA, ALTURA = 820, 1090
 
 # =============================================================================
 #  Onde ficam os logs (LGPD)
@@ -417,6 +422,18 @@ class AppAutomacaoSEI(ctk.CTk):
             fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
         )
         self.botao_disponibilizar.grid(row=0, column=1, padx=(5, 0), sticky="ew")
+
+        # Terceiro caminho: nenhum bloco. Os campos ficam cinzas e travados,
+        # para ninguem acreditar que o numero digitado sera usado.
+        self.botao_sem_bloco = ctk.CTkButton(
+            quadro,
+            text="Nao incluir em bloco de assinatura",
+            command=lambda: self._escolher_modo(MODO_SEM_BLOCO),
+            font=ctk.CTkFont(),
+        )
+        self.botao_sem_bloco.grid(
+            row=4, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="ew"
+        )
         self.modo_bloco = MODO_DISPONIBILIZAR
         self._pintar_modo()
 
@@ -432,6 +449,29 @@ class AppAutomacaoSEI(ctk.CTk):
 
     def _pintar_modo(self):
         """Destaca o botao escolhido, para nao haver duvida na hora de gravar."""
+        if self.modo_bloco == MODO_SEM_BLOCO:
+            self.botao_sem_bloco.configure(
+                fg_color=AZUL_ESCURO, hover_color=HOVER_ESCURO,
+                border_width=3, border_color=AZUL_CLARO,
+            )
+            # Campos cinzas e travados: a tela mostra que o numero que estiver
+            # escrito ali nao sera usado.
+            for entrada in (self.entrada_bloco, self.entrada_bloco2):
+                entrada.configure(state="disabled", text_color=GRAY_APAGADO)
+            for botao in (self.botao_incluir, self.botao_disponibilizar,
+                       self.botao_sem_bloco):
+                botao.configure(fg_color=AZUL_APAGADO, hover_color=HOVER_APAGADO,
+                                border_width=0, state="disabled")
+            return
+
+        self.botao_sem_bloco.configure(
+            fg_color=AZUL_APAGADO, hover_color=HOVER_APAGADO, border_width=0
+        )
+        for entrada in (self.entrada_bloco, self.entrada_bloco2):
+            entrada.configure(state="normal", text_color=TEXTO_PADRAO)
+        for botao in (self.botao_incluir, self.botao_disponibilizar,
+                       self.botao_sem_bloco):
+            botao.configure(state="normal")
         escolhido, outro = (
             (self.botao_disponibilizar, self.botao_incluir)
             if self.modo_bloco == MODO_DISPONIBILIZAR
@@ -493,6 +533,10 @@ class AppAutomacaoSEI(ctk.CTk):
         aceitaria a segunda inclusao, entao avisamos e devolvemos (vazio) para
         a execucao nao partir com um erro la no fim do lote.
         """
+        # No modo "sem bloco" os campos sao IGNORADOS de proposito, mesmo que
+        # ainda tenham numero escrito: o botao escolhido manda nao o bloco.
+        if self.modo_bloco == MODO_SEM_BLOCO:
+            return "", ""
         bloco1 = self.entrada_bloco.get().strip()
         bloco2 = self.entrada_bloco2.get().strip()
         if bloco1 and bloco1 == bloco2:
@@ -588,11 +632,12 @@ class AppAutomacaoSEI(ctk.CTk):
         usuario, senha = credencial
 
         bloco1, bloco2 = self._registrar_bloco()
-        acao_bloco = (
-            "incluir e disponibilizar"
-            if self.modo_bloco == MODO_DISPONIBILIZAR
-            else "so incluir (sem disponibilizar)"
-        )
+        if self.modo_bloco == MODO_SEM_BLOCO:
+            acao_bloco = "NAO incluir em bloco de assinatura"
+        elif self.modo_bloco == MODO_DISPONIBILIZAR:
+            acao_bloco = "incluir e disponibilizar"
+        else:
+            acao_bloco = "so incluir (sem disponibilizar)"
 
         # Confirmacao explicita: e o equivalente ao --confirmar da linha de
         # comando. Sem este "ok" nada e gravado no SEI.
@@ -622,7 +667,8 @@ class AppAutomacaoSEI(ctk.CTk):
         for widget in (self.botao_iniciar, self.botao_planilha,
                        self.entrada_usuario, self.entrada_senha,
                        self.entrada_bloco, self.entrada_bloco2,
-                       self.botao_incluir, self.botao_disponibilizar):
+                       self.botao_incluir, self.botao_disponibilizar,
+                       self.botao_sem_bloco):
             widget.configure(state="disabled")
         self.botao_iniciar.configure(text="Executando...")
 
@@ -675,11 +721,12 @@ class AppAutomacaoSEI(ctk.CTk):
                 f"Bloco 1: {bloco1 or '(nao informado)'}  |  "
                 f"Bloco 2: {bloco2 or '(nao informado)'}"
             )
-            self.log.log(
-                "Acao no bloco: "
-                + ("incluir e disponibilizar" if modo_bloco == MODO_DISPONIBILIZAR
-                   else "so incluir")
-            )
+            if modo_bloco == MODO_SEM_BLOCO:
+                self.log.log("Acao no bloco: NAO incluir em bloco de assinatura")
+            elif modo_bloco == MODO_DISPONIBILIZAR:
+                self.log.log("Acao no bloco: incluir e disponibilizar")
+            else:
+                self.log.log("Acao no bloco: so incluir")
             self.log.log("=" * 66)
 
             # LGPD: os logs de auditoria do backend contem IDs de processo.
@@ -766,7 +813,8 @@ class AppAutomacaoSEI(ctk.CTk):
         for widget in (self.botao_iniciar, self.botao_planilha,
                        self.entrada_usuario, self.entrada_senha,
                        self.entrada_bloco, self.entrada_bloco2,
-                       self.botao_incluir, self.botao_disponibilizar):
+                       self.botao_incluir, self.botao_disponibilizar,
+                       self.botao_sem_bloco):
             widget.configure(state="normal")
         self.log.log("-" * 66)
 
