@@ -6,6 +6,7 @@ Nao autentica e nao faz nenhuma requisicao: a instancia e criada com __new__ e o
 payload e montado a partir do HTML REAL capturado em ruas_inclusao/.
 """
 import os
+import re
 import sys
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # raiz do projeto
@@ -20,12 +21,29 @@ from app4_inclusao import (  # noqa: E402
 )
 
 TELA = "ruas_inclusao/2_documento_gerar_1790173515.html"
+# O infra_hash e o da MESMA linha da lupa. Cada tela/sessao tem o seu, entao
+# pegar "o primeiro hash do arquivo" traria o de outro link e o teste passaria
+# a errado (ou falharia sem motivo real).
+_HASH_DA_LUPA = re.search(
+    r"infra_hash=([0-9a-f]{32,})",
+    re.search(
+        r"objLupaDocumentoTextoBase\s*=\s*new infraLupaText\([^)]*\)",
+        open(TELA, "rb").read().decode("utf-8", "replace"),
+        re.S,
+    ).group(0),
+).group(1)
+
+# A URL da lupa e EXTRAIDA do JS da tela capturada. Nao se espera uma string
+# fixa aqui: o proprio teste exige que o infra_hash venha da tela (regra de
+# ouro do projeto - hash nunca e previsto nem fixado). As checagens abaixo
+# comparam com o que a tela realmente traz.
 LUPA_ESPERADA = (
     "controlador.php?acao=documento_modelo_selecionar&tipo_selecao=1"
-    "&id_object=objLupaDocumentoTextoBase&arvore=1&id_procedimento=900000002"
+    "&id_object=objLupaDocumentoTextoBase&arvore=1&id_procedimento=941528881"
     "&id_serie=12&infra_sistema=100000100&infra_unidade_atual=110031457"
-    "&infra_hash=HASH_DE_EXEMPLO_NAO_USAR_EM_PRODUCAO"
-)
+) + "&infra_hash=" + _HASH_DA_LUPA
+
+
 
 FALHAS = []
 
@@ -96,9 +114,12 @@ checar(
 
 print("\n[5] URL da lupa lida do JS da tela (hash dinamico, nunca fixado)")
 checar("lupa", api._url_lupa_documento_modelo(sopa), LUPA_ESPERADA)
+# A tela tem VÁRIOS infra_hash (26 no HTML capturado) - cada link/sessao tem o
+# seu. O que importa e o da LINHA DA LUPA: e ele que o _url_lupa_documento_-
+# modelo precisa extrair, e nao qualquer um da pagina.
 checar_verdade(
-    "lupa contem infra_hash da tela",
-    "infra_hash=HASH_DE_EXEMPLO_NAO_USAR_EM_PRODUCAO" in api._url_lupa_documento_modelo(sopa),
+    "lupa contem o infra_hash da PRÓPRIA linha da lupa (nunca fixado)",
+    f"infra_hash={_HASH_DA_LUPA}" in api._url_lupa_documento_modelo(sopa),
 )
 checar(
     "lupa ausente na tela ->",
@@ -192,10 +213,28 @@ def ler_tela(nome):
     return open(os.path.join("ruas_inclusao", nome), "rb").read()
 
 
-TELA_PROC = ler_tela("0_processo_aberto_1790173514.html")
-TELA_ARVORE = ler_tela("1_arvore_1790173515.html")
-TELA_TIPO = ler_tela("1_escolher_tipo_1790173515.html")
-TELA_GERAR = ler_tela("2_documento_gerar_1790173515.html")
+# Os HTMLs foram capturados de um processo real (941528881) e ficam com esse id
+# em todos os links. Como o teste roda contra o processo ficticio
+# ID_PROC_TESTE, os links precisam apontar para ele: a guarda de ABERTURA so
+# libera procedimento_trabalhar/visualizar quando o id_procedimento da URL
+# esta em ids_liberados. Sem esta troca a trava barra o teste - e ela esta
+# certa: barrar mesmo. E exatamente a protecao de prazo do NAO VISUALIZADO.
+ID_PROC_TESTE = "900000002"
+
+
+def reidendizar(html):
+    """Troca o processo dos links pelo id ficticio do teste."""
+    return re.sub(
+        rb"id_procedimento=\d+",
+        b"id_procedimento=" + ID_PROC_TESTE.encode(),
+        html,
+    )
+
+
+TELA_PROC = reidendizar(ler_tela("0_processo_aberto_1790173514.html"))
+TELA_ARVORE = reidendizar(ler_tela("1_arvore_1790173515.html"))
+TELA_TIPO = reidendizar(ler_tela("1_escolher_tipo_1790173515.html"))
+TELA_GERAR = reidendizar(ler_tela("2_documento_gerar_1790173515.html"))
 LUPA_OK = (
     b'<html><tr>'
     b'<td><input id="chkInfraItem0" name="chkInfraItem" tabindex="1013" title="148410511"'
@@ -244,10 +283,11 @@ def rodar_fluxo(protocolo=None, consultar_lupa=True, lupa_status=200, serie="411
     api2._salvar_tela = lambda *a, **k: None
     api2._registrar_auditoria_escrita = lambda *a, **k: None
     api2._link_trabalhar_na_caixa = lambda idp: (
-        "controlador.php?acao=procedimento_trabalhar&id_procedimento=900000002&infra_hash=do-teste"
+        f"controlador.php?acao=procedimento_trabalhar&id_procedimento={ID_PROC_TESTE}"
+        "&infra_hash=do-teste"
     )
     id_criado = api2.incluir_documento_interno(
-        id_procedimento="900000002",
+        id_procedimento=ID_PROC_TESTE,
         id_serie=serie,
         texto_inicial="N",
         protocolo_modelo=protocolo,
