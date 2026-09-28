@@ -97,10 +97,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM --- Conferindo se o .exe realmente saiu -------------------------------
+if not exist "dist\AutomacaoSEI.exe" (
+    echo.
+    echo [ERRO] A compilacao terminou sem gerar dist\AutomacaoSEI.exe.
+    echo        O arquivo AutomacaoSEI.spec que aparece na pasta e so a
+    echo        "receita" do build - NAO e o programa. O programa e o .exe.
+    echo        Leia as mensagens acima para ver a causa.
+    exit /b 1
+)
+
 echo.
 echo === Pronto =============================================================
 echo.
-echo    Executavel:  dist\AutomacaoSEI.exe
+echo    >>> PROGRAMA GERADO:  dist\AutomacaoSEI.exe  <<<
+echo.
+echo    (o arquivo AutomacaoSEI.spec na pasta e so a receita do build;
+echo     ignore-o. Para usar o programa, de dois cliques no .exe acima)
 echo.
 echo    Distribuicao:
 echo      - envie APENAS o dist\AutomacaoSEI.exe

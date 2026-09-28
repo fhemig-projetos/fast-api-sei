@@ -450,14 +450,39 @@ instalado** no PC de quem usa.
 
 ### Cada usuario usa o proprio login
 
-A tela **nao** le o `.env` e **nao** embute credencial no `.exe`. Se voce marcar
-"Lembrar neste PC", usuario e senha ficam cifrados com **CryptProtectData
-(DPAPI do proprio Windows)** em
-`%APPDATA%\\AutomacaoSEI\\credenciais.dat`: so abrem para o usuario do
-Windows que gravou, naquele computador. O botao "Limpar" apaga.
+A tela **nao** le o `.env` e **nao** embute credencial no `.exe`. A **senha e
+pedida a cada uso** e vale so enquanto o programa estiver aberto: **nada e
+gravado no computador** - nem usuario, nem senha, nem arquivo de credencial.
+
+Isso e proposital. O SEI registra o **autor** de cada documento criado. Se o
+login viesse de um arquivo embutido no executavel, todo mundo que copiasse o
+programa criaria documentos no nome de quem o distribuiu.
 
 > **Nunca distribua a pasta `venv/` nem o arquivo `.env` do projeto** - envie
 > apenas o `dist/AutomacaoSEI.exe`.
+
+### Simular antes de gravar
+
+A tela tem uma faixa avisando em que modo esta. A constante `SIMULAR`, no topo de
+`interface_app.py`, controla isso:
+
+- **`SIMULAR = True`** — a tela faz login, troca de unidade, le a planilha e
+  resolve os processos, mas **para antes de criar ou editar qualquer
+  documento** (o equivalente ao `--plano` da linha de comando). E o modo para
+  conferencias, sem risco.
+- **`SIMULAR = False`** — cada linha da planilha cria um documento no SEI, no
+  nome do usuario digitado na tela.
+
+> **ATENCAO:** com `SIMULAR = False` a gravacao e **real**: confira a planilha
+> e o Bloco de Assinatura antes de confirmar, e confira os documentos criados
+> dentro de cada processo ao final. Para voltar a simular, ponha `True` e rode
+> `build_exe.bat` de novo.
+
+### Onde ficam os logs
+
+Os logs de auditoria contem IDs de processo e sao gravados em
+`%APPDATA%\\AutomacaoSEI\\logs\\` - fora da pasta do executavel e fora do
+projeto. O caminho exato aparece no console a cada execucao.
 
 ### Se o executavel reclamar de `No module named 'tkinter'`
 

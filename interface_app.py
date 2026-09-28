@@ -19,26 +19,57 @@ POR QUE A THREAD E OBRIGATORIA
     atualizacao para a thread principal.
 
 O app4_inclusao.py NAO e alterado: importamos executar_lote e montamos o
-argparse.Namespace que ele espera. As credenciais vao para os.environ
-(SEI_USUARIO/SEI_SENHA), que e de onde o backend sempre leu.
+argparse.Namespace que ele espera. As credenciais da tela sao repassadas
+EXPLICITAS ao construtor da API, e tambem injetadas em os.environ
+(SEI_USUARIO/SEI_SENHA) ANTES e DEPOIS do import - assim o login e sempre o de
+quem esta na tela, exista ou nao um arquivo de configuracao na maquina.
+
+COMO GRAVAR DE VERDADE
+    A constante SIMULAR, no topo deste arquivo, controla se a tela grava. Com
+    SIMULAR = True ela faz login, troca de unidade, le a planilha e resolve os
+    processos, mas PARA ANTES de criar ou editar qualquer documento (o "--plano"
+    da linha de comando) - util para conferences antes de gravar. Com False,
+    cada linha da planilha cria um documento no SEI, no nome de quem esta na
+    tela. O modo em que a tela esta fica escrito na faixa colorida e na
+    pergunta de confirmacao.
+
+LGPD - POR QUE A SENHA E PEDIDA A CADA USO
+    Nada e gravado no computador: nem usuario, nem senha, nem arquivo de
+    configuracao. O executavel nao leva credencial embutida e a tela nao le
+    o arquivo de configuracao do projeto. Cada operador digita o proprio
+    login porque o SEI registra o AUTOR de cada documento criado - se o
+    login viesse de um arquivo embutido, os termos sairiam no nome errado.
+    Os logs de auditoria (que contem IDs de processo) vao para a pasta do
+    usuario no Windows, fora do executavel e fora da pasta do projeto.
 
 Uso:  python interface_app.py
 """
 
 import argparse
+import functools
 import os
 import sys
 import threading
 import traceback
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
-
-import credenciais_sei
+from tkinter import TclError, filedialog, messagebox
 
 # =============================================================================
 #  Parametros do SEI - ajuste aqui quando a proxima etapa chegar
 # =============================================================================
+
+# Liga/desliga a gravacao. Com SIMULAR = True a tela faz login, troca de
+# unidade, le a planilha e resolve os processos, mas PARA ANTES de gravar:
+# nenhum documento e criado ou editado no SEI. É o mesmo "plano" que a CLI
+# oferece com --plano, exposto aqui como uma constante para nao depender de
+# digitacao.
+#
+# ATENCAO: com SIMULAR = False, CADA LINHA da planilha cria um documento de
+# verdade no SEI, no nome do usuario digitado na tela. Confira a planilha e o
+# Bloco de Assinatura antes de confirmar. Para ensaiar sem risco, ponha
+# True novamente.
+SIMULAR = False
 
 SERIE = "4110"                      # tipo: Cessao Especial Onus Cedente
 PROTOCOLO_MODELO = "148410511"      # protocolo do "Documento Modelo"
@@ -47,8 +78,30 @@ HIPOTESE_LEGAL = "4"                # nivel Restrito
 TEXTO_INICIAL = "D"                 # D = usa o Documento Modelo
 
 # Etiquetas da interface
-TITULO = "Automacao SEI-MG — Cessao Especial"
-LARGURA, ALTURA = 820, 700
+TITULO = "Inclusão Automatizada de Documentos SEI"
+LARGURA, ALTURA = 820, 800
+
+# =============================================================================
+#  Onde ficam os logs (LGPD)
+# =============================================================================
+# O backend abre os logs de auditoria por caminho RELATIVO (log_auditoria.txt,
+# log_auditoria_escrita.txt e a pasta ruas_inclusao/). Rodando a automacao com
+# a pasta do proprio usuario como diretorio atual, nada disso aparece dentro
+# da pasta do executavel - e o .gitignore continua protegendo o projeto.
+APP_DIR = "AutomacaoSEI"
+
+
+def pasta_dados() -> str:
+    """%APPDATA%\\AutomacaoSEI - fora do projeto e fora do .exe."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, APP_DIR)
+
+
+def pasta_logs() -> str:
+    """Pasta dos logs desta maquina, criada sob demanda."""
+    destino = os.path.join(pasta_dados(), "logs")
+    os.makedirs(destino, exist_ok=True)
+    return destino
 
 # =============================================================================
 #  Console: captura os prints do backend e joga na caixa de texto
@@ -71,22 +124,36 @@ class RedirecionadorConsole:
         self._linha = ""
         self.fechado = False
 
+    # --- O que o print() e a biblioteca pandas/requests esperam de um arquivo --
+    def flush(self):
+        if self._linha:
+            self._mostrar(self._linha)
+            self._linha = ""
+
+    def isatty(self):
+        """Diz que isto NAO e um terminal. Sem isso, bibliotecas acham que ha
+        cores/ANSI e poluem o console da tela com codigos invisiveis."""
+        return False
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def writable(self):
+        return not self.fechado
+
     def write(self, texto):
         """Recebe o que o print() escreveria. Reconstitui as linhas."""
         if self.fechado:
             return
         try:
-            self._linha += texto
+            # O Windows pode mandar \r\n; normalizamos para \n antes de quebrar.
+            self._linha += (texto or "").replace("\r\n", "\n").replace("\r", "\n")
             while "\n" in self._linha:
                 linha, self._linha = self._linha.split("\n", 1)
                 self._mostrar(linha)
         except Exception:  # noqa: BLE001 - nunca derrubar o log por causa dele
             pass
-
-    def flush(self):
-        if self._linha:
-            self._mostrar(self._linha)
-            self._linha = ""
 
     def _mostrar(self, linha):
         # after(0, ...) = agenda para a thread principal. show="center" faz
@@ -94,10 +161,15 @@ class RedirecionadorConsole:
         self.widget.after(0, self._inserir, linha)
 
     def _inserir(self, linha):
-        self.widget.configure(state="normal")
-        self.widget.insert("end", linha + "\n")
-        self.widget.see("end")
-        self.widget.configure(state="disabled")
+        try:
+            self.widget.configure(state="normal")
+            self.widget.insert("end", linha + "\n")
+            self.widget.see("end")
+            self.widget.configure(state="disabled")
+        except TclError:
+            # A janela foi fechada enquanto a thread ainda escrevia no console.
+            # Fechamos o redirecionador em vez de derrubar a automacao.
+            self.fechado = True
 
     def restaurar(self):
         """Devolve o stdout original (chamado no fim da execucao)."""
@@ -167,21 +239,29 @@ class AppAutomacaoSEI(ctk.CTk):
         super().__init__()
         self.title(TITULO)
         self.geometry(f"{LARGURA}x{ALTURA}")
-        self.resizable(False, False)
-
+        # Redimensionavel de proposito: o console inferior e o lugar onde o
+        # usuario acompanha o progresso de cada linha da planilha, e ele
+        # precisa de espaco quando o lote e grande.
+        self.minsize(LARGURA, ALTURA)
+        # O tema tem que vir ANTES de qualquer widget: definido depois, o
+        # CustomTkinter redesenha a tela e o Entry da senha perde o "show".
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
         # Estado
         self.caminho_planilha = ""
+        self.bloco_assinatura = ""
         self.executando = False
-        self._redirecionador = None
         self._api = None
+        self._caminho_logs = None
 
         self._montar_layout()
-        self._carregar_credenciais_salvas()
+        # O console e criado no layout, entao o redirecionador so pode existir
+        # depois dele - e antes de qualquer metodo que ja queria escrever.
         self.log = RedirecionadorConsole(self.console)
-        self.log.log("Interface pronta. Selecione a planilha e clique em Iniciar.")
+        self.protocol("WM_DELETE_WINDOW", self._ao_fechar)
+        self.log.log("Interface pronta. Informe o seu usuario do SEI e a planilha.")
+        self.log.log("Sua senha e usada so nesta execucao: nada e gravado no PC.")
 
     # ------------------------------------------------------------------ layout
     def _montar_layout(self):
@@ -189,7 +269,9 @@ class AppAutomacaoSEI(ctk.CTk):
         self.grid_rowconfigure(5, weight=1)
 
         titulo = ctk.CTkLabel(
-            self, text="Automacao SEI-MG", font=ctk.CTkFont(size=24, weight="bold")
+            self,
+            text="Inclusão Automatizada de Documentos SEI",
+            font=ctk.CTkFont(size=24, weight="bold"),
         )
         titulo.grid(row=0, column=0, padx=24, pady=(24, 0), sticky="w")
         sub = ctk.CTkLabel(self, text="Cessao Especial — Mail Merge via planilha Excel")
@@ -199,17 +281,30 @@ class AppAutomacaoSEI(ctk.CTk):
         self._secao_planilha()     # 3
         self._secao_bloco()        # 4
         self._secao_console()      # 5
-        self._secao_botao()        # 6
+        self._secao_botao()        # 6 e 7
 
     def _secao_credenciais(self):
         quadro = ctk.CTkFrame(self, corner_radius=10)
         quadro.grid(row=2, column=0, padx=24, pady=(0, 12), sticky="ew")
         quadro.grid_columnconfigure(1, weight=1)
 
-        rotulo = ctk.CTkLabel(quadro, text="Usuario SEI:", font=ctk.CTkFont(weight="bold"))
-        rotulo.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
+        rotulo = ctk.CTkLabel(quadro, text="Usuario do SEI:", font=ctk.CTkFont(weight="bold"))
+        rotulo.grid(row=0, column=0, padx=(14, 8), pady=(12, 4), sticky="w")
         self.entrada_usuario = ctk.CTkEntry(quadro, placeholder_text="SEI_USUARIO")
-        self.entrada_usuario.grid(row=0, column=1, padx=(0, 10), pady=(12, 6), sticky="ew")
+        self.entrada_usuario.grid(row=0, column=1, padx=(0, 14), pady=(12, 4), sticky="ew")
+        self.entrada_usuario.bind("<Return>", lambda _e: self.entrada_senha.focus_set())
+
+        rotulo = ctk.CTkLabel(quadro, text="Senha do SEI:", font=ctk.CTkFont(weight="bold"))
+        rotulo.grid(row=1, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        # show="*": a senha nunca aparece na tela nem em print/print_rastreio.
+        self.entrada_senha = ctk.CTkEntry(
+            quadro, show="*", placeholder_text="Senha do SEI"
+        )
+        # O customtkinter 6.0.0 perde o "show" durante o proprio __init__ do
+        # CTkEntry (o Entry interno ja nasce sem ele). Sem esta reaplicacao a
+        # senha apareceria em letras na tela - por isso conferimos de novo.
+        self.entrada_senha._entry.configure(show="*")
+        self.entrada_senha.grid(row=1, column=1, padx=(0, 14), pady=(0, 12), sticky="ew")
 
     def _secao_planilha(self):
         quadro = ctk.CTkFrame(self, corner_radius=10)
@@ -259,6 +354,26 @@ class AppAutomacaoSEI(ctk.CTk):
         self.console.configure(state="disabled")
 
     def _secao_botao(self):
+
+        # Faixa de modo: deixa obvio, ANTES de clicar, se o programa vai
+        # apenas simular ou realmente gravar documentos no SEI. Fica logo
+        # acima do botao, no fim da tela, para nao atrapalhar o grid das
+        # secoes (que ocupam as linhas 2 a 5).
+        texto_modo = (
+            "MODO SIMULACAO: le a planilha e confere os processos, sem criar nada no SEI."
+            if SIMULAR else
+            "MODO GRAVACAO: cada linha da planilha cria um documento no SEI."
+        )
+        self.etiqueta_modo = ctk.CTkLabel(
+            self,
+            text=texto_modo,
+            corner_radius=8,
+            fg_color=("#8a6100", "#5c4200") if SIMULAR else ("#8b1a1a", "#5c1010"),
+            text_color="#ffffff",
+            font=ctk.CTkFont(weight="bold", size=12),
+            height=30,
+        )
+        self.etiqueta_modo.grid(row=6, column=0, padx=24, pady=(0, 12), sticky="ew")
         self.botao_iniciar = ctk.CTkButton(
             self,
             text="Iniciar Automacao",
@@ -267,7 +382,7 @@ class AppAutomacaoSEI(ctk.CTk):
             hover_color="#1f6aa5",
             command=self.iniciar_automacao,
         )
-        self.botao_iniciar.grid(row=6, column=0, padx=24, pady=(0, 24), sticky="ew")
+        self.botao_iniciar.grid(row=7, column=0, padx=24, pady=(0, 24), sticky="ew")
 
     def _registrar_bloco(self):
         """Guarda o numero do bloco para a proxima etapa da automacao."""
@@ -275,63 +390,26 @@ class AppAutomacaoSEI(ctk.CTk):
         return self.bloco_assinatura
 
     # ------------------------------------------------------------- credenciais
-    def _carregar_credenciais_salvas(self):
-        """Preenche os campos com o que foi salvo para ESTE usuario do Windows."""
-        try:
-            if not credenciais_sei.tem_credenciais():
-                return
-            dados = credenciais_sei.carregar()
-        except credenciais_sei.ErroCredenciais as erro:
-            self.etiqueta_credenciais.configure(text=f"Credencial anterior: {erro}")
-            return
-        if not dados.get("usuario"):
-            return
-        self.entrada_usuario.insert(0, dados["usuario"])
-        self.entrada_senha.insert(0, dados.get("senha", ""))
-        self.caixa_lembrar.select()
-        self.etiqueta_credenciais.configure(
-            text="Credencial carregada (somente neste usuario do Windows)."
-        )
-
-    def _limpar_credenciais(self):
-        try:
-            apagou = credenciais_sei.apagar()
-        except credenciais_sei.ErroCredenciais as erro:
-            self.etiqueta_credenciais.configure(text=str(erro))
-            return
-        self.etiqueta_credenciais.configure(
-            text="Credenciais apagadas deste computador." if apagou else "Nada estava salvo."
-        )
-
     def _obter_credenciais(self):
         """
-        Le usuario/senha da tela. Devolve (usuario, senha) ou None se faltar algo.
+        Le usuario e senha da tela. Devolve (usuario, senha) ou None se faltar algo.
 
-        Fail-safe: sem credencial NAO tentamos o .env escondido - assim ninguem
-        roda a automacao com a conta de outra pessoa sem perceber.
+        REGRA DE OURO (LGPD): a credencial vem SEMPRE do que a pessoa digitou.
+        Nao existe fallback para arquivo, variavel de ambiente herdada ou valor
+        fixo - se o campo vier vazio, a execucao nao parte. E isso que impede o
+        documento de ser criado no nome de outra pessoa.
         """
         usuario = self.entrada_usuario.get().strip()
         senha = self.entrada_senha.get()
         if not usuario or not senha:
-            self.log.log("Informe o usuario e a senha do SEI para continuar.")
+            self.log.log("ERRO: preencha o usuario e a senha do SEI.")
+            messagebox.showwarning(
+                "Credenciais",
+                "Informe o USUARIO e a SENHA do SEI para continuar.",
+                parent=self,
+            )
+            (self.entrada_usuario if not usuario else self.entrada_senha).focus_set()
             return None
-
-        if self.caixa_lembrar.get():
-            try:
-                caminho = credenciais_sei.salvar(usuario, senha)
-                self.etiqueta_credenciais.configure(text=credenciais_sei.aviso_credenciais())
-                self.log.log(f"Credencial salva em: {caminho}")
-            except credenciais_sei.ErroCredenciais as erro:
-                self.etiqueta_credenciais.configure(text=str(erro))
-                self.log.log(f"Nao foi possivel lembrar a senha: {erro}")
-        else:
-            # Desmarcou "lembrar": apaga o que estava salvo antes.
-            try:
-                credenciais_sei.apagar()
-            except credenciais_sei.ErroCredenciais:
-                pass
-
-        credenciais_sei.aplicar_no_ambiente(usuario, senha)
         return usuario, senha
 
     # ----------------------------------------------------------------- acoes
@@ -370,81 +448,150 @@ class AppAutomacaoSEI(ctk.CTk):
         """
         Ponto de entrada do botao: valida TUDO na thread principal e sobe a
         thread de trabalho. Nenhuma chamada de rede acontece aqui.
+
+        Tudo que a thread precisa (planilha, usuario, senha, bloco) e lido
+        NESTA thread e viaja junto como argumento. Ler um widget Tk de dentro
+        da thread de trabalho e inseguro: o Tkinter so pode ser tocado pela
+        thread que criou a janela.
         """
         if self.executando:
             self.log.log("Ja existe uma execucao em andamento.")
             return
         if not self.caminho_planilha or not os.path.isfile(self.caminho_planilha):
             self.log.log("Selecione uma planilha Excel valida primeiro.")
-            messagebox.showwarning("Planilha", "Selecione uma planilha Excel valida.")
+            messagebox.showwarning("Planilha", "Selecione uma planilha Excel valida.",
+                                   parent=self)
             return
 
         credencial = self._obter_credenciais()
         if credencial is None:
-            messagebox.showwarning("Credenciais", "Informe o usuario e a senha do SEI.")
-            return
-        usuario, _senha = credencial
+            return  # o aviso ja foi mostrado dentro de _obter_credenciais
+        usuario, senha = credencial
 
-        self._registrar_bloco()
+        bloco = self._registrar_bloco()
 
         # Confirmacao explicita: e o equivalente ao --confirmar da linha de
         # comando. Sem este "ok" nada e gravado no SEI.
-        if not messagebox.askyesno(
-            "Confirmar",
-            "Vai criar documentos no SEI usando o usuario:\n\n"
-            f"    {usuario}\n\n"
-            f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
-            f"Bloco de assinatura: {self.bloco_assinatura or '(nao informado)'}\n\n"
-            "Cada linha da planilha cria UM documento. Confirma?",
-        ):
+        if SIMULAR:
+            pergunta = (
+                f"MODO SIMULACAO - nada sera criado no SEI.\n\n"
+                f"Usuario: {usuario}\n"
+                f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
+                f"Bloco de assinatura: {bloco or '(nao informado)'}\n\n"
+                "Vai entrar no SEI, ler a planilha e conferir os processos.\n"
+                "Quer rodar a simulacao?"
+            )
+        else:
+            pergunta = (
+                f"Vai criar documentos no SEI usando o usuario:\n\n    {usuario}\n\n"
+                f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
+                f"Bloco de assinatura: {bloco or '(nao informado)'}\n\n"
+                "Cada linha da planilha cria UM documento, no SEU nome. Confirma?"
+            )
+        if not messagebox.askyesno("Confirmar", pergunta, parent=self):
             self.log.log("Operacao cancelada pelo usuario.")
             return
 
         self.executando = True
-        self.botao_iniciar.configure(state="disabled", text="Executando...")
-        self.botao_planilha.configure(state="disabled")
-        self.entrada_usuario.configure(state="disabled")
-        self.entrada_senha.configure(state="disabled")
-        self.entrada_bloco.configure(state="disabled")
+        for widget in (self.botao_iniciar, self.botao_planilha,
+                       self.entrada_usuario, self.entrada_senha,
+                       self.entrada_bloco):
+            widget.configure(state="disabled")
+        self.botao_iniciar.configure(text="Executando...")
 
         # daemon=True: se a janela fechar no meio, a thread nao segura o
         # processo do Python. O log avisa que o lote pode ficar incompleto.
-        thread = threading.Thread(target=self._thread_automacao, daemon=True)
+        thread = threading.Thread(
+            target=self._thread_automacao,
+            args=(usuario, senha, self.caminho_planilha, bloco),
+            daemon=True,
+        )
         thread.start()
 
-    def _thread_automacao(self):
+    def _injetar_credenciais(self, usuario, senha):
+        """
+        Deixa as credenciais DA TELA onde o backend le: os.environ.
+
+        E chamada em DOIS momentos, e os dois sao necessarios:
+
+        1. ANTES do import do app4_inclusao. O modulo scripts_read/app3 le as
+           credenciais no import e, se nao achar nem no ambiente nem no
+           arquivo de configuracao, levanta RuntimeError e aborta. Sem esta
+           chamada, quem usa o .exe em um PC sem aquele arquivo nem chegaria
+           a abrir a tela de login.
+
+        2. DEPOIS do import. O proprio app4_inclusao roda _carregar_env_() no
+           import e sobrescreve estas chaves com o arquivo de configuracao da
+           maquina de desenvolvimento. Sem esta segunda chamada, o login seria
+           o de outra pessoa e o documento sairia assinado por ela.
+        """
+        os.environ["SEI_USUARIO"] = usuario
+        os.environ["SEI_SENHA"] = senha
+
+    def _thread_automacao(self, usuario, senha, planilha, bloco):
         """
         Roda FORA da thread principal. Tudo que precisar da interface volta
         por self.after(...), e a escrita no console passa pelo Redirecionador.
         """
+        pasta_anterior = None
         try:
-            # O backend le credenciais do ambiente: garantimos que sao as deste
-            # operador antes de qualquer import que capture os valores.
             sys.stdout = self.log
             self.log.log("=" * 66)
-            self.log.log(f"Usuario SEI: {self.entrada_usuario.get().strip()}")
-            self.log.log(f"Planilha   : {self.caminho_planilha}")
-            self.log.log(f"Bloco assinatura: {self.bloco_assinatura or '(nao informado)'}")
+            self.log.log(f"Usuario SEI: {usuario}")
+            self.log.log(f"Planilha   : {planilha}")
+            self.log.log(f"Bloco assinatura: {bloco or '(nao informado)'}")
             self.log.log("=" * 66)
 
-            # Import tardio: puxa o app4 (que le o .env) dentro da thread, ja
-            # com as credenciais do operador no ambiente.
+            # LGPD: os logs de auditoria do backend contem IDs de processo.
+            # Rodando com a pasta do usuario como diretorio atual, eles nao
+            # aparecem nem ao lado do .exe nem na pasta do projeto.
+            try:
+                pasta_anterior = os.getcwd()
+                destino_logs = pasta_logs()
+                os.chdir(destino_logs)
+                self._caminho_logs = destino_logs
+                self.log.log(f"Logs desta execucao em: {destino_logs}")
+            except OSError as erro:
+                pasta_anterior = None
+                self.log.log(f"Aviso: nao foi possivel usar a pasta de logs ({erro}).")
+
+            # 1o) Credenciais ANTES do import: o scripts_read/app3 aborta com
+            # RuntimeError se, no import, nao encontrar usuario/senha nem no
+            # ambiente nem em arquivo. E o que permite rodar num PC que tem
+            # apenas o .exe.
+            self._injetar_credenciais(usuario, senha)
             from app4_inclusao import InclusaoDocumentoSEI, executar_lote
-            from scripts_read.app3 import UNIDADE_ALVO
+
+            # 2o) Credenciais DEPOIS do import: o app4_inclusao roda
+            # _carregar_env_() ao ser importado e sobrescreve o ambiente com
+            # o arquivo de configuracao da maquina de desenvolvimento. Esta
+            # chamada garante que o login seja o de quem esta na tela.
+            self._injetar_credenciais(usuario, senha)
 
             self.log.log("Conectando ao SEI...")
-            api = InclusaoDocumentoSEI(
-                os.environ["SEI_USUARIO"],
-                os.environ["SEI_SENHA"],
-                unidade_alvo=UNIDADE,
-            )
+            # As credenciais vao EXPLICITAS no construtor - e isto que
+            # realmente autentica, independentemente de qualquer arquivo.
+            api = InclusaoDocumentoSEI(usuario, senha, unidade_alvo=UNIDADE)
+            api.salvar_telas = False
+            self._api = api
             if not api.autenticar():
                 raise RuntimeError("Falha no login. Verifique usuario e senha.")
             api.trocar_unidade()
 
-            args = montar_args_lote(self.caminho_planilha)
+            args = montar_args_lote(planilha, plano=SIMULAR)
             executar_lote(api, args, None, TEXTO_INICIAL)
-            self.log.log("Automacao concluida com sucesso.")
+            if SIMULAR:
+                # Nenhum documento foi criado nem editado acima; o console
+                # mostrou o pre-voo (processos resolvidos, linha a linha).
+                self.log.log("=" * 66)
+                self.log.log("SIMULACAO encerrada: NADA foi criado ou editado no SEI.")
+                self.log.log("Para gravar de verdade, ponha SIMULAR = False no codigo.")
+                self.log.log("=" * 66)
+            else:
+                self.log.log("=" * 66)
+                self.log.log(f"GRAVACAO concluida com sucesso como: {usuario}")
+                self.log.log("Confira os documentos criados dentro de cada processo no SEI.")
+                self.log.log("=" * 66)
 
         except SystemExit:
             # O backend usa sys.exit() para abortar com mensagem (ex.: processo
@@ -455,18 +602,42 @@ class AppAutomacaoSEI(ctk.CTk):
             self.log.log(f"ERRO: {erro}")
             self.log.log(traceback.format_exc(limit=3))
         finally:
-            sys.stdout = self.log._original
-            self.after(0, self._finalizar_execucao)
+            if pasta_anterior:
+                try:
+                    os.chdir(pasta_anterior)
+                except OSError:
+                    pass
+            self.log.restaurar()
+            # Se a janela foi fechada no meio, o after() nao tem para onde ir:
+            # neste caso nao ha mais interface para reabilitar, e a excecao
+            # ficaria solta numa thread que ninguem ve.
+            try:
+                self.after(0, self._finalizar_execucao)
+            except (RuntimeError, TclError):
+                pass
 
     def _finalizar_execucao(self):
         """Volta a thread principal para reabilitar a interface."""
         self.executando = False
-        self.botao_iniciar.configure(state="normal", text="Iniciar Automacao")
-        self.botao_planilha.configure(state="normal")
-        self.entrada_usuario.configure(state="normal")
-        self.entrada_senha.configure(state="normal")
-        self.entrada_bloco.configure(state="normal")
+        self.botao_iniciar.configure(text="Iniciar Automacao")
+        for widget in (self.botao_iniciar, self.botao_planilha,
+                       self.entrada_usuario, self.entrada_senha,
+                       self.entrada_bloco):
+            widget.configure(state="normal")
         self.log.log("-" * 66)
+
+    def _ao_fechar(self):
+        """Nao deixa a janela morrer no meio de uma gravacao."""
+        if self.executando:
+            if not messagebox.askyesno(
+                "Sair",
+                "A automacao ainda esta rodando.\n\n"
+                "Sair agora interrompe a criacao dos documentos restantes e o "
+                "lote pode ficar incompleto. Quer sair mesmo assim?",
+                parent=self,
+            ):
+                return
+        self.destroy()
 
 
 def main():
