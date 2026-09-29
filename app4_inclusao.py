@@ -476,8 +476,26 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         except requests.exceptions.RequestException as exc:
             print(f"  POST da troca falhou: {exc}")
             return False
-        self.unidade_atual = self.unidade_alvo
-        print("  Comando de troca de unidade enviado.")
+        # Confere se a troca REALMENTE aconteceu. Antes o codigo assumia que sim
+        # e seguia operando: se o SEI recusasse (usuario sem permissao na
+        # unidade), o programacontinuaria procurando processo na unidade
+        # errada e o erro apareceria no fim, sem relacao com a causa real.
+        try:
+            confirmacao = self._requisicao_segura(
+                "get", BASE_SEI + "controlador.php?acao=principal", timeout=30
+            )
+        except requests.exceptions.RequestException as exc:
+            print(f"  Nao consegui confirmar a troca de unidade: {exc}")
+            return False
+        self._detectar_unidade_atual(confirmacao.text)
+        if self.unidade_atual != self.unidade_alvo:
+            print(
+                f"  O SEI recusou a troca para a unidade {self.unidade_alvo} "
+                f"(continua em {self.unidade_atual or 'desconhecida'}). "
+                "Verifique se este usuario tem permissao nessa unidade."
+            )
+            return False
+        print(f"  Unidade confirmada: {self.unidade_atual}")
         return True
 
     def _localizar_processo_na_caixa(self, numero, limite_paginas=20):

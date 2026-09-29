@@ -433,9 +433,24 @@ relativos.
 ## Interface grafica (GUI) e executavel
 
 Para quem nao abre terminal: `interface_app.py` e a tela em CustomTkinter. Ela
-pede a planilha, o numero do Bloco de Assinatura e o **proprio login do SEI**,
-roda a automacao em uma thread separada (a janela nunca congela) e mostra tudo
-em tempo real no console inferior.
+pede a planilha, o **proprio login do SEI** (com a senha digitada a cada uso),
+a **unidade** onde os processos estao, o **tipo** e o **modelo** do documento, e o
+numero do Bloco de Assinatura. Roda a automacao em uma thread separada (a janela
+nunca congela) e mostra tudo em tempo real no console inferior.
+
+### Unidade, tipo e modelo (multiplas unidades)
+
+A **unidade** e preenchida sozinha: o proprio SEI diz, no login, em que unidade o
+usuario esta. O campo continua editavel para quem opera em outra.
+
+**Tipo** e **Modelo** ficam VAZIOS de proposito, porque cada unidade tem os seus:
+
+- **Tipo** (`id_serie`) - em *Incluir Documento*, o numero do tipo (ex.: `4110`).
+  Sem ele nao ha qual serie criar.
+- **Modelo** - o protocolo do *Documento Modelo* (ex.: `148410511`), visivel no
+  documento ja criado. Sem ele o SEI abriria um documento **em branco**.
+
+Os tres sao obrigatorios, validados na tela antes de qualquer gravacao.
 
 ```bash
 # Rodar direto do Python (desenvolvimento)

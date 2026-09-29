@@ -97,15 +97,19 @@ MODO_SEM_BLOCO = "sem_bloco"
 MODO_INCLUIR = "incluir"
 MODO_DISPONIBILIZAR = "disponibilizar"
 
-SERIE = "4110"                      # tipo: Cessao Especial Onus Cedente
-PROTOCOLO_MODELO = "148410511"      # protocolo do "Documento Modelo"
-UNIDADE = "110031457"               # unidade onde os processos estao
+# A UNIDADE e descoberta no login (o proprio SEI diz em qual unidade o usuario
+# esta) e pode ser alterada na tela. Os outros dois NAO tem valor fixo: cada
+# unidade tem os seus, entao ficam VAZIOS e sao obrigatorios. Sem modelo o SEI
+# criaria um documento em branco - por isso a tela valida antes de gravar.
+UNIDADE_PADRAO = ""                 # preenchida pela deteccao apos o login
+TIPO_PADRAO = ""                    # id_serie  (ex.: 4110 na unidade atual)
+MODELO_PADRAO = ""                  # protocolo do Documento Modelo
 HIPOTESE_LEGAL = "4"                # nivel Restrito
 TEXTO_INICIAL = "D"                 # D = usa o Documento Modelo
 
 # Etiquetas da interface
 TITULO = "Inclusão Automatizada de Documentos SEI"
-LARGURA, ALTURA = 820, 1090
+LARGURA, ALTURA = 820, 1160
 
 # =============================================================================
 #  Onde ficam os logs (LGPD)
@@ -215,7 +219,8 @@ class RedirecionadorConsole:
 
 def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
                      bloco1: str = "", bloco2: str = "",
-                     modo: str = MODO_DISPONIBILIZAR):
+                     modo: str = MODO_DISPONIBILIZAR,
+                     unidade: str = "", tipo: str = "", modelo: str = ""):
     """
     Monta o argparse.Namespace que o executar_lote() do app4_inclusao.py espera.
 
@@ -238,13 +243,13 @@ def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
         editar_documento=None,
         processo=None,
         id_procedimento=None,
-        serie=SERIE,
+        serie=(tipo or "").strip(),
         hipotese_legal=HIPOTESE_LEGAL,
         texto_inicial=TEXTO_INICIAL,
-        protocolo_modelo=PROTOCOLO_MODELO,
+        protocolo_modelo=(modelo or "").strip(),
         id_documento_modelo=None,
         sem_consultar_modelo=False,
-        unidade=UNIDADE,
+        unidade=(unidade or "").strip(),
         salvar_telas=False,
         # Blocos de assinatura: IDs internos lidos da tela. Vazio = nao incluir.
         bloco1=(bloco1 or "").strip(),
@@ -301,7 +306,7 @@ class AppAutomacaoSEI(ctk.CTk):
     # ------------------------------------------------------------------ layout
     def _montar_layout(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(6, weight=1)
 
         titulo = ctk.CTkLabel(
             self,
@@ -313,10 +318,11 @@ class AppAutomacaoSEI(ctk.CTk):
         sub.grid(row=1, column=0, padx=24, pady=(0, 18), sticky="w")
 
         self._secao_credenciais()   # 2
-        self._secao_planilha()     # 3
-        self._secao_bloco()        # 4
-        self._secao_console()      # 5
-        self._secao_botao()        # 6 e 7
+        self._secao_unidade()       # 3
+        self._secao_planilha()      # 4
+        self._secao_bloco()         # 5
+        self._secao_console()       # 6
+        self._secao_botao()         # 7 e 8
 
     def _secao_credenciais(self):
         quadro = ctk.CTkFrame(self, corner_radius=10)
@@ -341,9 +347,60 @@ class AppAutomacaoSEI(ctk.CTk):
         self.entrada_senha._entry.configure(show="*")
         self.entrada_senha.grid(row=1, column=1, padx=(0, 14), pady=(0, 12), sticky="ew")
 
-    def _secao_planilha(self):
+        # Ao sair da senha, detecta a unidade: caminho mais natural para o
+        # usuario - digita usuario, senha, e a unidade aparece sozinha.
+        self.entrada_senha.bind("<FocusOut>", lambda _e: self._detectar_unidade())
+
+    def _secao_unidade(self):
+        """
+        Unidade (detectada no login) + Tipo e Modelo do documento.
+
+        Unidade e preenchida sozinha: o proprio SEI diz, no login, em qual
+        unidade o usuario esta. Os dois campos de baixo NAO tem padrao porque
+        cada unidade tem os seus - e sao obrigatorios, ja que sem Tipo nao ha
+        qual serie criar e sem Modelo o SEI abriria um documento em branco.
+        """
         quadro = ctk.CTkFrame(self, corner_radius=10)
         quadro.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="ew")
+        quadro.grid_columnconfigure(1, weight=1)
+
+        rot = ctk.CTkLabel(quadro, text="Unidade:", font=ctk.CTkFont(weight="bold"))
+        rot.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
+        self.entrada_unidade = ctk.CTkEntry(
+            quadro, placeholder_text="detectada no login"
+        )
+        self.entrada_unidade.grid(row=0, column=1, padx=(0, 14), pady=(12, 6), sticky="ew")
+
+        rot = ctk.CTkLabel(quadro, text="Tipo:", font=ctk.CTkFont(weight="bold"))
+        rot.grid(row=1, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        self.entrada_tipo = ctk.CTkEntry(
+            quadro, placeholder_text="id do tipo (ex.: 4110)"
+        )
+        self.entrada_tipo.grid(row=1, column=1, padx=(0, 14), pady=(0, 4), sticky="ew")
+
+        rot = ctk.CTkLabel(quadro, text="Modelo:", font=ctk.CTkFont(weight="bold"))
+        rot.grid(row=2, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        self.entrada_modelo = ctk.CTkEntry(
+            quadro, placeholder_text="protocolo do Documento Modelo"
+        )
+        self.entrada_modelo.grid(row=2, column=1, padx=(0, 14), pady=(0, 4), sticky="ew")
+
+        dica = ctk.CTkLabel(
+            quadro,
+            text="Tipo: no SEI, em Incluir Documento, veja o numero do tipo.\n"
+                 "Modelo: abra um documento do tipo e copie o protocolo "
+                 "(ex.: 0000.00.0000000/0000-00).",
+            anchor="w", justify="left", font=ctk.CTkFont(size=11),
+        )
+        dica.grid(row=3, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
+
+        # Aponta que a unidade ainda nao foi detectada.
+        self.entrada_tipo.bind("<FocusOut>", lambda _e: self._validar_documento())
+        self.entrada_modelo.bind("<FocusOut>", lambda _e: self._validar_documento())
+
+    def _secao_planilha(self):
+        quadro = ctk.CTkFrame(self, corner_radius=10)
+        quadro.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="ew")
         quadro.grid_columnconfigure(0, weight=1)
 
         linha = ctk.CTkFrame(quadro, fg_color="transparent")
@@ -459,7 +516,8 @@ class AppAutomacaoSEI(ctk.CTk):
             for entrada in (self.entrada_bloco, self.entrada_bloco2):
                 entrada.configure(state="disabled", text_color=GRAY_APAGADO)
             for botao in (self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco):
+                       self.botao_sem_bloco, self.entrada_unidade,
+                       self.entrada_tipo, self.entrada_modelo):
                 botao.configure(fg_color=AZUL_APAGADO, hover_color=HOVER_APAGADO,
                                 border_width=0, state="disabled")
             return
@@ -470,7 +528,8 @@ class AppAutomacaoSEI(ctk.CTk):
         for entrada in (self.entrada_bloco, self.entrada_bloco2):
             entrada.configure(state="normal", text_color=TEXTO_PADRAO)
         for botao in (self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco):
+                       self.botao_sem_bloco, self.entrada_unidade,
+                       self.entrada_tipo, self.entrada_modelo):
             botao.configure(state="normal")
         escolhido, outro = (
             (self.botao_disponibilizar, self.botao_incluir)
@@ -514,7 +573,7 @@ class AppAutomacaoSEI(ctk.CTk):
             font=ctk.CTkFont(weight="bold", size=12),
             height=30,
         )
-        self.etiqueta_modo.grid(row=6, column=0, padx=24, pady=(0, 12), sticky="ew")
+        self.etiqueta_modo.grid(row=7, column=0, padx=24, pady=(0, 12), sticky="ew")
         self.botao_iniciar = ctk.CTkButton(
             self,
             text="Iniciar Automacao",
@@ -523,7 +582,7 @@ class AppAutomacaoSEI(ctk.CTk):
             fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
             command=self.iniciar_automacao,
         )
-        self.botao_iniciar.grid(row=7, column=0, padx=24, pady=(0, 24), sticky="ew")
+        self.botao_iniciar.grid(row=8, column=0, padx=24, pady=(0, 24), sticky="ew")
 
     def _registrar_bloco(self):
         """
@@ -551,6 +610,84 @@ class AppAutomacaoSEI(ctk.CTk):
         self.bloco_assinatura = bloco1
         self.bloco_assinatura2 = bloco2
         return bloco1, bloco2
+
+    # ------------------------------------------------- unidade, tipo e modelo
+    def _detectar_unidade(self):
+        """
+        Loga no SEI so para descobrir em que unidade o usuario esta.
+
+        O proprio SEI devolve essa informacao no login (o app3 ja le em
+        _detectar_unidade_atual). A sessao fica guardada e e REAPROVEITADA
+        quando o usuario clicar em Iniciar - nao ha segundo login.
+
+        Silenciosa: se falhar, nao atrapalha. O campo Unidade continua editavel
+        e o Iniciar valida de novo, com mensagem clara.
+        """
+        usuario = self.entrada_usuario.get().strip()
+        senha = self.entrada_senha.get()
+        if not usuario or not senha:
+            return
+        if self.entrada_unidade.get().strip():
+            return                      # ja preenchida (pelo usuario ou antes)
+        try:
+            self._injetar_credenciais(usuario, senha)
+            from app4_inclusao import InclusaoDocumentoSEI
+            api = InclusaoDocumentoSEI(usuario, senha, unidade_alvo=None)
+            if not api.autenticar():
+                return
+            detectada = (api.unidade_atual or "").strip()
+            if detectada:
+                self.entrada_unidade.insert(0, detectada)
+                self._api = api
+                self.log.log(f"Unidade detectada no login: {detectada}")
+                self._validar_documento()
+        except Exception:  # noqa: BLE001 - deteccao e conveniência, nao essencial
+            return
+
+    def _validar_documento(self):
+        """
+        Unidade e obrigatoria; Tipo e Modelo tambem, e VAZIOS de proposito.
+
+        Sem Tipo nao ha qual serie criar. Sem Modelo o SEI abriria um documento
+        em branco (texto_inicial "N" em vez de "D"), que parece sucesso e nao
+        e - por isso a tela barra antes de qualquer gravacao.
+        """
+        if not self.entrada_unidade.get().strip():
+            self.log.log("ERRO: informe a unidade (o id interno do SEI).")
+            return False
+        if not self.entrada_tipo.get().strip():
+            self.log.log("ERRO: o campo Tipo e obrigatorio.")
+            return False
+        if not self.entrada_modelo.get().strip():
+            self.log.log("ERRO: o campo Modelo e obrigatorio.")
+            return False
+        return True
+
+    def _pedir_unidade_tipo_modelo(self):
+        """Mensagem unica para os tres campos que faltam. True se estiver tudo certo."""
+        faltando = []
+        if not self.entrada_unidade.get().strip():
+            faltando.append("UNIDADE (o id interno, no numero da URL do SEI)")
+        if not self.entrada_tipo.get().strip():
+            faltando.append("TIPO (em Incluir Documento, veja o numero do tipo)")
+        if not self.entrada_modelo.get().strip():
+            faltando.append(
+                "MODELO (protocolo do Documento Modelo, no documento ja criado)"
+            )
+        if not faltando:
+            return True
+        self.log.log("ERRO: faltam campos: " + ", ".join(faltando))
+        messagebox.showwarning(
+            "Faltam dados do documento",
+            "Preencha antes de iniciar:\n\n  -  " + "\n  -  ".join(faltando)
+            + "\n\nCada unidade tem os seus valores; o de Tipo e Modelo vem de "
+              "la. Sem Modelo o SEI criaria um documento em branco.",
+            parent=self,
+        )
+        (self.entrada_unidade if not self.entrada_unidade.get().strip()
+         else self.entrada_tipo if not self.entrada_tipo.get().strip()
+         else self.entrada_modelo).focus_set()
+        return False
 
     # ------------------------------------------------------------- credenciais
     def _obter_credenciais(self):
@@ -631,6 +768,12 @@ class AppAutomacaoSEI(ctk.CTk):
             return  # o aviso ja foi mostrado dentro de _obter_credenciais
         usuario, senha = credencial
 
+        if not self._pedir_unidade_tipo_modelo():
+            return
+        unidade = self.entrada_unidade.get().strip()
+        tipo = self.entrada_tipo.get().strip()
+        modelo = self.entrada_modelo.get().strip()
+
         bloco1, bloco2 = self._registrar_bloco()
         if self.modo_bloco == MODO_SEM_BLOCO:
             acao_bloco = "NAO incluir em bloco de assinatura"
@@ -654,6 +797,8 @@ class AppAutomacaoSEI(ctk.CTk):
             pergunta = (
                 f"Vai criar documentos no SEI usando o usuario:\n\n    {usuario}\n\n"
                 f"Planilha: {os.path.basename(self.caminho_planilha)}\n"
+                f"Unidade: {unidade}\n"
+                f"Tipo: {tipo}   |   Modelo: {modelo}\n"
                 f"Bloco 1: {bloco1 or '(nao informado)'}  |  "
                 f"Bloco 2: {bloco2 or '(nao informado)'}\n"
                 f"Acao no bloco: {acao_bloco}\n\n"
@@ -668,7 +813,8 @@ class AppAutomacaoSEI(ctk.CTk):
                        self.entrada_usuario, self.entrada_senha,
                        self.entrada_bloco, self.entrada_bloco2,
                        self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco):
+                       self.botao_sem_bloco, self.entrada_unidade,
+                       self.entrada_tipo, self.entrada_modelo):
             widget.configure(state="disabled")
         self.botao_iniciar.configure(text="Executando...")
 
@@ -678,7 +824,7 @@ class AppAutomacaoSEI(ctk.CTk):
             target=self._thread_automacao,
             args=(
                 usuario, senha, self.caminho_planilha, bloco1, bloco2,
-                self.modo_bloco,
+                self.modo_bloco, unidade, tipo, modelo,
             ),
             daemon=True,
         )
@@ -705,7 +851,8 @@ class AppAutomacaoSEI(ctk.CTk):
         os.environ["SEI_SENHA"] = senha
 
     def _thread_automacao(
-        self, usuario, senha, planilha, bloco1, bloco2, modo_bloco
+        self, usuario, senha, planilha, bloco1, bloco2, modo_bloco,
+        unidade, tipo, modelo,
     ):
         """
         Roda FORA da thread principal. Tudo que precisar da interface volta
@@ -758,7 +905,7 @@ class AppAutomacaoSEI(ctk.CTk):
             self.log.log("Conectando ao SEI...")
             # As credenciais vao EXPLICITAS no construtor - e isto que
             # realmente autentica, independentemente de qualquer arquivo.
-            api = InclusaoDocumentoSEI(usuario, senha, unidade_alvo=UNIDADE)
+            api = InclusaoDocumentoSEI(usuario, senha, unidade_alvo=unidade)
             api.salvar_telas = SALVAR_TELAS
             self._api = api
             if not api.autenticar():
@@ -767,7 +914,7 @@ class AppAutomacaoSEI(ctk.CTk):
 
             args = montar_args_lote(
                 planilha, plano=SIMULAR, bloco1=bloco1, bloco2=bloco2,
-                modo=modo_bloco,
+                modo=modo_bloco, unidade=unidade, tipo=tipo, modelo=modelo,
             )
             executar_lote(api, args, None, TEXTO_INICIAL)
             if SIMULAR:
@@ -814,7 +961,8 @@ class AppAutomacaoSEI(ctk.CTk):
                        self.entrada_usuario, self.entrada_senha,
                        self.entrada_bloco, self.entrada_bloco2,
                        self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco):
+                       self.botao_sem_bloco, self.entrada_unidade,
+                       self.entrada_tipo, self.entrada_modelo):
             widget.configure(state="normal")
         self.log.log("-" * 66)
 
