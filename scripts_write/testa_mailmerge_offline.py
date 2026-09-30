@@ -195,7 +195,8 @@ class _FakeCaixa:
         self.nao_visualizados = set(nao_visualizados)
         self.buscas = []
 
-    def _localizar_processo_na_caixa(self, numero):
+    def _localizar_processo_na_caixa(self, numero, limite_paginas=20,
+                                      mesmo_assim=False):
         self.buscas.append(numero)
         if numero not in self.mapa:
             return None, False
@@ -282,12 +283,16 @@ assert por_id[0] == "900000001"
 print("MESMO_ASSIM_PERMITIU:", por_id[0])
 
 # 7e) Sem coluna "Processo SEI" e sem --processo -> erro claro, sem inventar.
+# O codigo de saida agora e a MENSAGEM (sys.exit("...")), e nao 1: e ela que a
+# interface mostra ao operador. O que importa aqui e que aborta e que o motivo
+# fica legivel.
 api = _FakeLoteAPI({})
 try:
     _preflight_lote(api, [_item(0, "")], _args_lote())
 except SystemExit as erro:
-    assert erro.code == 1
-    print("SEM_PROCESSO_ABORTOU_COMO_ESPERADO")
+    assert erro.code not in (0, None, 1), f"saida sem motivo: {erro.code!r}"
+    assert "Processo SEI" in str(erro.code), erro.code
+    print("SEM_PROCESSO_ABORTOU_COMO_ESPERADO:", erro.code)
 else:
     raise AssertionError("sem processo na planilha e sem CLI deveria abortar")
 assert api.buscas == [], "nao deveria procurar nada quando falta o numero"
@@ -318,6 +323,92 @@ for valor, esperado in [
 assert _processo_marca_nao_visualizado(None) is False
 assert _processo_marca_nao_visualizado({}) is False
 print("GUARDA_NAO_VISUALIZADO_OK")
+
+class _CaixaDeTeste:
+    """Caixa minima, so para os casos de 'linha sem Processo SEI'."""
+
+    def __init__(self, mapa, vermelhos=()):
+        self.mapa = mapa
+        self.nao_visualizados = set(vermelhos)
+        self._ultima_busca_localizou = False
+
+    def _localizar_processo_na_caixa(self, numero, limite_paginas=20, mesmo_assim=False):
+        if numero not in self.mapa:
+            return None, False
+        return {"IdProtocolo": self.mapa[numero],
+                "NaoVisualizado": numero in self.nao_visualizados}, True
+
+
+def _item(i, proc):
+    return {"indice": i, "processo": proc,
+            "dados": {"Nome Servidor": f"PESSOA{i}", "Nº do termo": str(i)}}
+
+
+_mapa = {P_A: "900000001", P_B: "900000002"}
+
+# Linha SEM "Processo SEI" e' ignorada, e nao erro do lote. Na planilha real
+# (HRJP) sao 229 de 868 linhas; antes cada uma abortava o lote em sys.exit(1).
+_por_id = _preflight_lote(_CaixaDeTeste(_mapa),
+                           [_item(0, P_A), _item(1, ""), _item(2, ""), _item(3, P_B)],
+                           _args_lote(plano=True), somente_plano=True)
+assert set(_por_id) == {0, 3}, f"ignoradas entraram no lote: {_por_id}"
+print("LINHAS_SEM_PROCESSO_IGNORADAS")
+
+# Lote INTEIRO sem processo: erro explicito, nunca um silencio.
+try:
+    _preflight_lote(_CaixaDeTeste({}), [_item(0, ""), _item(1, "")],
+                    _args_lote(plano=True), somente_plano=True)
+    raise AssertionError("deveria ter avisado que nao ha processo nenhum")
+except SystemExit as _erro:
+    assert "Processo SEI" in str(_erro.code), _erro.code
+print("LOTE_SEM_PROCESSO_NENHUM_AVISADO")
+
+# ERRO DE VERDADE continua abortando tudo - o skip nao pode dilui-lo.
+try:
+    _preflight_lote(_CaixaDeTeste({P_A: "900000001"}),
+                    [_item(0, P_A), _item(1, "999.99.9999999/2020-99")],
+                    _args_lote(plano=True), somente_plano=True)
+    raise AssertionError("processo nao encontrado deveria abortar o lote")
+except SystemExit:
+    pass
+print("ERRO_REAL_CONTINUA_ABORTANDO")
+
+# Trava de prazo intacta: vermelho barra sem consentimento, passa com ele.
+try:
+    _preflight_lote(_CaixaDeTeste({P_A: "900000001"}, vermelhos={P_A}),
+                    [_item(0, P_A)], _args_lote(plano=True), somente_plano=True)
+    raise AssertionError("vermelho deveria barrar sem --mesmo-assim")
+except SystemExit:
+    pass
+assert set(_preflight_lote(_CaixaDeTeste({P_A: "900000001"}, vermelhos={P_A}),
+                           [_item(0, P_A)],
+                           _args_lote(plano=True, mesmo_assim=True),
+                           somente_plano=True)) == {0}
+print("TRAVA_PRAZO_INTACTA")
+
+# 7j) Marcadores REAIS do modelo da unidade 110031718.
+# Copiados do 4_editor_montar salvo numa execucao real. Diferencas em relacao
+# ao fixture antigo, e que faziam o merge falhar em silencio:
+#   - MASP/ADM nao tem <span>: o <strong> vem solto;
+#   - o titulo usa "N&ordm; XX&nbsp;/ 2026", sem <span> em volta do XX;
+#   - o marcador e "(N&ordm;)", SEM espaco (a trava tinha "(N &ordm;)").
+_real = (
+    "<p>MASP&nbsp;<strong>(N&ordm;)</strong>, doravante denominado(a) CEDIDO(A)</p>"
+    "<p>MASP <strong>(N&ordm;)</strong>, <strong>(SIGLA DO CARGO)</strong>, "
+    "<strong>(FUN&Ccedil;&Atilde;O)</strong>, ADM <strong>(N&ordm;)</strong></p>"
+    "<p style=\"font-weight: bold;\">TERMO DE CESS&Atilde;O ESPECIAL DE "
+    "SERVIDOR CIVIL N&ordm; XX&nbsp;/ 2026</p>"
+)
+_mesclado, _cont = C._mesclar_html(_real, DADOS_EXEMPLO)
+assert _cont["MASP"] == 2, f"MASP no modelo real: {_cont['MASP']} (esperado 2)"
+assert _cont["ADM"] == 1, f"ADM no modelo real: {_cont['ADM']} (esperado 1)"
+assert _cont["Nº do termo (titulo)"] + _cont["Nº do termo (titulo sem span)"] == 1, \
+    f"titulo no modelo real nao casou: {_cont}"
+assert MASP_EXEMPLO in _mesclado, "MASP nao foi substituido"
+assert "XX" not in _mesclado, "XX permaneceu no titulo"
+assert "N&ordm; 1&nbsp;/ 2026" in _mesclado, \
+    "numero do termo nao entrou no titulo"
+print("MARCADORES_DO_MODELO_REAL_OK")
 
 print("TODOS_OS_TESTES_OFFLINE_PASSARAM")
 

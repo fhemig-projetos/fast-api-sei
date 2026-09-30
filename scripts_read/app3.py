@@ -46,7 +46,11 @@ USUARIO, SENHA = _carregar_credenciais()
 VALUE_SEL_ORGAO = "52"
 VALUE_HDN_ACAO = "2"
 
-UNIDADE_ALVO = "110007141"
+# Unidade onde a automacao deve ATUAR. Este e o alvo fixo do trabalho, e nao
+# a unidade em que o login cai: o SEI lembra da ultima unidade acessada e
+# devolve uma coisa diferente a cada sessao. Usar a do login fazia o programa
+# gravar na unidade errada sem avisar.
+UNIDADE_ALVO = "110031718"
 LIMITE_PAGINAS = 5
 PREFIXO_FILTRO = "1080"
 ARQUIVO_SAIDA = "caixa_recebidos_fhemig_1080.xlsx"

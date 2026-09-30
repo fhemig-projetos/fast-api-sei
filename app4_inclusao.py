@@ -47,6 +47,7 @@ if _root_ not in sys.path:
     sys.path.insert(0, _root_)
 
 import re  # noqa: E402
+import unicodedata  # noqa: E402
 import time  # noqa: E402
 from datetime import datetime  # noqa: E402
 from html import unescape as _unescape_entidades  # noqa: E402
@@ -91,25 +92,78 @@ COLUNAS_MERGE = ("Nome Servidor", "MASP", "ADM", "Cargo", "Função", "Nº do te
 
 # (descricao, coluna, regex, grupo_substituido, tratamento)
 # grupo_substituido = 0 substitui o grupo inteiro; >0 substitui so aquele grupo.
+# O HTML que o SEI guarda DENTRO do <textarea> vem escapado: o "&" vira
+# "&amp;", o "<" vira "&lt;" e os atributos saem como "&quot;". As tres
+# regras de marcador (MASP, ADM e o N do titulo) foram escritas para a forma
+# NAO escapada e por isso nunca casaram com o documento real: o contador
+# ficava em zero e o servidor era salvo com "(No)" e "XX" originais.
+# Estas expressoes aceitam as DUAS formas, porque o CKEditor grava de um jeito
+# ou de outro conforme a versao do SEI.
+_TAG_ABRE = r"(?:<|&lt;)"
+_TAG_FECHA = r"(?:>|&gt;)"
+_ATRIBUTOS = r"[^>]*"
+_ORDINAL = r"(?:&(?:amp;)?ordm;|º)"
+_ESPACO_NAO_QUEBRAVEL = r"(?:&nbsp;|&amp;nbsp;)"
+_TAG_SPAN = _TAG_ABRE + r"span" + _ATRIBUTOS + r"\s*" + _TAG_FECHA
+_TAG_STRONG_ABRE = _TAG_ABRE + r"strong" + _ATRIBUTOS + r"\s*" + _TAG_FECHA
+
+
+# Regras que TEM de casar: se uma delas devolver zero, o documento saiu com o
+# marcador original e precisa ser barrado. Vale mais que procurar texto no
+# corpo, porque o marcador pode ter grafia diferente da esperada.
+REGRAS_OBRIGATORIAS = ("MASP", "Nº do termo (titulo)")
+
+# Colunas que sao identificadores numéricos inteiros. O pandas devolve float
+# quando a coluna do Excel tem alguma célula vazia: o MASP 1234 chega como
+# "1234.0" e ia para dentro do documento com o ".0" no meio do número.
+COLUNAS_NUMERICAS = ("MASP", "ADM", "Nº do termo")
+
+
+def _sem_decimal_de_planilha(valor):
+    """
+    "1234.0" -> "1234". Preserva os zeros à esquerda ("00000000" continua
+    "00000000"), que int() perderia.
+
+    Só remove a casa decimal quando ela é toda zero. Um valor com parte
+    fracionária de verdade ("1234.5") é devolvido intacto em vez de ser
+    arredondado em silêncio: número de MASP não tem fração, e arredondar
+    dado de servidor seria pior do que mostrar o que veio.
+    """
+    texto = str(valor or "").strip()
+    if not texto:
+        return ""
+    inteiro = re.fullmatch(r"(\d+)[.,]0+", texto)
+    return inteiro.group(1) if inteiro else texto
+
+
 REGRAS_MERGE = (
     (
         "MASP",
         "MASP",
-        r"(MASP\s*(?:&nbsp;)?\s*<span[^>]*>\s*(?:<strong[^>]*>\s*)?)(\(N(?:\s*&ordm;|º)\))",
+        rf"(MASP\s*{_ESPACO_NAO_QUEBRAVEL}?\s*(?:{_TAG_SPAN}\s*)?{_TAG_STRONG_ABRE}\s*)"
+        rf"(\(\s*N\s*{_ORDINAL}\s*\))",
         2,
         "texto",
     ),
     (
         "ADM",
         "ADM",
-        r"(ADM\s*(?:&nbsp;)?\s*<span[^>]*>\s*(?:<strong[^>]*>\s*)?)(\(N(?:\s*&ordm;|º)\))",
+        rf"(ADM\s*{_ESPACO_NAO_QUEBRAVEL}?\s*(?:{_TAG_SPAN}\s*)?{_TAG_STRONG_ABRE}\s*)"
+        rf"(\(\s*N\s*{_ORDINAL}\s*\))",
         2,
         "texto",
     ),
     (
         "Nº do termo (titulo)",
         "Nº do termo",
-        r"(N\s*&ordm;\s*<span[^>]*>\s*)(XX)(\s*</span\s*>)",
+        rf"(N\s*{_ORDINAL}\s*{_TAG_SPAN}\s*)(XX)(\s*{_TAG_ABRE}/span\s*{_TAG_FECHA})",
+        2,
+        "texto",
+    ),
+    (
+        "Nº do termo (titulo sem span)",
+        "Nº do termo",
+        rf"(N\s*{_ORDINAL}\s+)(XX)(?=\s*(?:&nbsp;|&amp;nbsp;|/|&amp;))",
         2,
         "texto",
     ),
@@ -172,6 +226,15 @@ MARCADORES_DO_MODELO = (
     "(SIGLA DO CARGO)",
     "[NOME DO SERVIDOR]",
     "[DATA DO DIA DO PREENCHIMENTO]",
+    # Estes tres faltavam. Sem eles na trava, uma regra de merge que nao casasse
+    # passava BATIDA: o contador virava zero, nenhum aviso era dado e o
+    # documento era GRAVADO com "XX" e "(No)" no lugar dos numeros. E o que
+    # apareceu nos primeiros documentos da unidade 110031718.
+    # Forma real devolvida pelo CKEditor no modelo 110031718: "(N&ordm;)",
+    # sem espaco. Com "(N &ordm;)" a trava nao via a occurrences.
+    "(N&ordm;)",
+    "(N &ordm;)",
+    "(Nº)",
 )
 
 CAMPOS_RESUMO_PROCESSO = (
@@ -184,6 +247,21 @@ CAMPOS_RESUMO_PROCESSO = (
     "AtribuidoA",
     "Interessados",
 )
+
+
+class LinhaSemProcesso(ValueError):
+    """
+    A linha da planilha nao tem numero de processo em 'Processo SEI'.
+
+    Herda de ValueError para nao mudar quem ja tratava o erro antigo, mas e
+    uma CATEGORIA propria: nao e falha, e ausencia de trabalho. Nao ha processo
+    onde incluir documento para essa pessoa, entao nada e tentado nela.
+
+    Antes, essa linha virava falha comum e ABORTAVA o lote inteiro. Numa
+    planilha real (868 linhas, 229 sem processo) isso tornava o lote
+    impossivel de rodar. Erros de verdade - processo nao encontrado, processo
+    NAO VISUALIZADO - continuam abortando tudo como antes.
+    """
 
 
 class ErroInclusaoDocumento(Exception):
@@ -229,6 +307,9 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         "acao=bloco_escolher",
         # Endpoints ajax do editor (verificar_assinatura, confirmacao, etc.).
         "controlador_ajax.php",
+        # Pesquisa rapida do topo: localiza o processo pelo numero, sem
+        # depender da paginacao da caixa de "Recebidos".
+        "acao=protocolo_pesquisa_rapida",
         "acao=procedimento_trabalhar",
         "acao=procedimento_visualizar",
     )
@@ -262,6 +343,10 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         super().__init__(usuario, senha)
         self.unidade_alvo = unidade_alvo or UNIDADE_ALVO
         self.salvar_telas = False
+        # A ultima pesquisa rapida localizou o processo mas nao pode afirmar a
+        # marca de visualizado? Serve para a mensagem de erro distinguir
+        # "nao achei em lugar nenhum" de "achei, mas a marca nao se aplica".
+        self._ultima_busca_localizou = False
 
     @classmethod
     def _registrar_auditoria_escrita(cls, linha):
@@ -387,7 +472,14 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         """
         url_low = url.lower()
         ids = set(ids_liberados or ())
-        m_id = re.search(r"[?&]id_procedimento=(\d+)", url)
+        # O SEI usa "id_procedimento" na caixa e "id_protocolo" no
+        # redirecionamento da pesquisa rapida. A guarda procurava so o
+        # primeiro: na URL vinda da busca o id nao era reconhecido,
+        # id_url ficava vazio e a propria URL que o SEI devolveu como
+        # resultado da pesquisa era bloqueada como se fosse abertura nao
+        # autorizada. E a MESMA divergencia de nome ja corrigida na busca -
+        # aqui ela simplesmente travava o lote.
+        m_id = re.search(r"[?&]id_(?:protocolo|procedimento)=(\d+)", url)
         id_url = m_id.group(1) if m_id else ""
         bloqueios = [
             token
@@ -498,9 +590,154 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         print(f"  Unidade confirmada: {self.unidade_atual}")
         return True
 
-    def _localizar_processo_na_caixa(self, numero, limite_paginas=20):
-        """Varre a caixa da unidade atual (somente leitura) e devolve (item, encontrado)."""
+    def _buscar_processo_pela_pesquisa(self, numero, mesmo_assim=False):
+        """
+        Localiza o processo pelo campo de PESQUISA RAPIDA do SEI.
+
+        A alternativa antiga - varrer a caixa de "Recebidos" pagina por pagina -
+        so enxerga os primeiros processos da fila: numa unidade grande, um
+        processo antigo fica depois da ultima pagina e nunca e encontrado. A
+        pesquisa do topo existe em toda tela autenticada e acha pelo numero,
+        esteja o processo onde estiver.
+
+        DIVISAO DE PAPEL (a parte que importa para a seguranca):
+
+          - a PESQUISA e a descoberta: acha o processo pelo numero, sem
+            limite de paginas, e entrega o link de abertura;
+          - a CAIXA e a autoridade: e a unica tela que garante a marca
+            "Nao Visualizado".
+
+        Por isso so devolvemos o item quando o resultado traz a marca (branco
+        ou vermelho). Sem marca devolvemos None e o chamador cai no scraping
+        da caixa, como fazia antes.
+
+        mesmo_assim: consentimento explicito do operador (o checkbox "Abrir
+        processo NAO VISUALIZADO"). Ele nao e so um furador da trava - e o que
+        autoriza abrir quando a marca NAO pode ser lida, porque o processo
+        esta fora da caixa da unidade. Antes disso nao existia: o operador
+        marcava a caixa achando que resolveria, mas ela so era consultada
+        depois que o processo ja tinha sido localizado, e os processos fora
+        da caixa falhavam antes de ela ter alguma efeito.
+
+        REGRA DE OURO nº 2: o infra_hash vem do action do proprio formulario da
+        tela - nunca e escrito, previsto nem reaproveitado de outra sessao.
+        """
+        alvo = _limpar(numero or "").replace(" ", "")
+        if not alvo:
+            return None
+
+        # O campo de busca fica no topo de toda tela autenticada, mas nao em
+        # todas: procuramos na caixa e, se ela nao tiver, na home. Sem isso, um
+        # redirecionamento ou uma sessao em outra tela derrubaria a busca em
+        # silencio - e o lote voltaria a depender so da pagina 1 da caixa.
+        form = None
+        for html in (self.navegar_para_controle(), self.html_home):
+            if not html:
+                continue
+            sopa_pagina = BeautifulSoup(html.encode("utf-8", "replace"), "html.parser")
+            form = sopa_pagina.find("form", {"id": "frmProtocoloPesquisaRapida"})
+            if form is not None:
+                break
+        if form is None:
+            print("  Tela sem o campo de pesquisa rapida.")
+            return None
+
+        acao = self._action(form, base_url=BASE_SEI)
+        if not acao:
+            return None
+
+        dados = self._extrair_hidden_inputs(form)
+        campo = next(
+            (n for n in ("txtPesquisaRapida", "txtProtocoloPesquisa", "q")
+             if n in dados),
+            "txtPesquisaRapida",
+        )
+        dados[campo] = numero
+
+        try:
+            resposta, destino = self._ir(
+                "post", acao, data=dados, allow_redirects=False, timeout=30
+            )
+        except Exception as exc:  # noqa: BLE001 - busca e conveniencia
+            print(f"  Pesquisa rapida indisponivel ({exc}); usando a caixa.")
+            return None
+        self._salvar_tela("0a_pesquisa_rapida", resposta)
+
+        # O SEI responde a busca rapida com 302 para o processo:
+        #   ...acao=procedimento_trabalhar&acao_origem=protocolo_pesquisa_rapida
+        #       &id_protocolo=940848375&...
+        # Repare em "id_protocolo". A busca procurava "id_procedimento" e nunca
+        # casou: as 249 respostas reais vieram com o corpo VAZIO (por isso os
+        # HTMLs salvos com 0 byte) e o resultado era descartado, rendendo
+        # "processo nao encontrado" para todos os processos da planilha.
+        # Aceitamos as duas grafias: o campo da caixa e "id_procedimento", o
+        # redirecionamento da busca e "id_protocolo".
+        m_id = re.search(r"[?&]id_(?:protocolo|procedimento)=(\d+)", destino or "")
+        if m_id:
+            # O redirecionamento aponta direto para o processo (a URL que abre
+            # o prazo), mas nao traz a marca de visualizado. Nao devolvemos o
+            # item ainda: a marca so existe na caixa, e "desconhecido" nunca
+            # pode virar "pode abrir" (regra de ouro nº 1). Quem decide e o
+            # consentimento explicito do operador (--mesmo-assim).
+            if not mesmo_assim:
+                self._ultima_busca_localizou = True
+                print("  Processo localizado pela pesquisa, porem FORA da caixa "
+                      "da unidade: sem a marca de visualizado. Marque a opcao "
+                      "de abrir processo NAO VISUALIZADO para prosseguir.")
+                return None
+            print("  Processo localizado pela pesquisa (fora da caixa). "
+                  "Abrindo sem marca de visualizado: operador confirmou.")
+            return {"Processo": _limpar(numero), "IdProtocolo": m_id.group(1),
+                    "NaoVisualizado": None, "busca": "rapida",
+                    "Link": self._normalizar_url(destino)}
+
+        sopa = self._sopa(resposta)
+        for link in sopa.select("a[href]"):
+            href = link.get("href") or ""
+            if not any(t in href for t in self.TOKENS_ABERTURA):
+                continue
+            achou_id = re.search(r"[?&]id_(?:protocolo|procedimento)=(\d+)", href)
+            if not achou_id:
+                continue
+            # O texto do LINK e o proprio numero do processo no SEI
+            # (<a ... id_procedimento=X>2270.01.0064841/2026-56</a>). E ele
+            # que precisa casar: comparar a linha inteira nao serviria, porque
+            # o numero procurado sempre estaria ali - o do proprio link - e
+            # o resultado errado passaria como se fosse o certo.
+            texto_do_link = _limpar(link.get_text(" ", strip=True)).replace(" ", "")
+            if alvo not in texto_do_link:
+                continue
+            classes = link.get("class") or []
+            if "processoNaoVisualizado" in classes:
+                estado = True
+            elif "processoVisualizado" in classes:
+                estado = False
+            elif not mesmo_assim:
+                # Nem vermelho nem branco no link: nao sabemos se o processo ja
+                # foi lido. Nao afirmar o contrario - a caixa confirma.
+                print("  Resultado da pesquisa sem marca de visualizado; "
+                      "confirmando na caixa.")
+                return None
+            return {"Processo": _limpar(numero), "IdProtocolo": achou_id.group(1),
+                    "NaoVisualizado": estado, "busca": "rapida",
+                    "Link": self._normalizar_url(href)}
+        return None
+
+    def _localizar_processo_na_caixa(self, numero, limite_paginas=20,
+                                      mesmo_assim=False):
+        """
+        Procura o processo: 1) pesquisa rapida, 2) varrendo a caixa.
+
+        A pesquisa acha pelo numero em qualquer lugar; a caixa confirma a
+        marca de visualizado quando o processo esta na caixa da unidade.
+        """
         from scripts_read.app3 import raspar_pagina_recebidos
+
+        # Caminho rapido: acha pelo numero, sem limite de paginas.
+        self._ultima_busca_localizou = False
+        rapido = self._buscar_processo_pela_pesquisa(numero, mesmo_assim)
+        if rapido and rapido.get("IdProtocolo"):
+            return rapido, True
 
         html = self.navegar_para_controle()
         if not html or not any(
@@ -537,6 +774,38 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
             ),
             "",
         )
+
+    def _link_trabalhar_do_processo(self, id_procedimento, numero="",
+                                    mesmo_assim=False):
+        """
+        Link de ABERTURA do processo, com duas fontes e nesta ordem.
+
+        A caixa vem primeiro: e o caminho historico, ja testado, e traz o hash
+        fresco da propria tela. Mas a caixa so mostra a pagina 1 - num lote com
+        processos antigos o link nao estava la e a edicao falhava, mesmo com o
+        processo corretamente localizado pela busca.
+
+        Quando a caixa nao traz o link, refazemos a PESQUISA RAPIDA e usamos o
+        href que ela devolve.
+
+        Refazer AGORA, e nao reaproveitar o link guardado no pre-voo, e
+        proposital: num lote grande o pre-voo resolve todos os processos antes
+        de gravar qualquer um, e a gravacao comeca depois. Um hash guardado
+        nesse intervalo pode ja ter vencido - o link usado aqui e fresco de
+        verdade.
+        """
+        link = self._link_trabalhar_na_caixa(id_procedimento)
+        if link:
+            return link
+        if not numero:
+            return ""
+        # Aqui o processo JA foi validado no pre-voo (inclusive a trava de
+        # prazo), entao nao ha marca a relebr: o que precisamos e do link.
+        item = self._buscar_processo_pela_pesquisa(numero, mesmo_assim=True)
+        # So aceitamos o link se for mesmo o processo pedido.
+        if item and str(item.get("IdProtocolo") or "") == str(id_procedimento).strip():
+            return item.get("Link") or ""
+        return ""
 
     @staticmethod
     def _link_tipo_na_arvore(resposta):
@@ -628,8 +897,8 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
                 valor = datetime.now().strftime("%d/%m/%Y")
             else:
                 bruto = str(dados.get(coluna, "") or "").strip()
-                if tratamento == "texto" and bruto.isdigit() and coluna in ("MASP", "ADM", "Nº do termo"):
-                    valor = bruto
+                if tratamento == "texto" and coluna in COLUNAS_NUMERICAS:
+                    valor = _sem_decimal_de_planilha(bruto)
                 else:
                     valor = _unescape_entidades(bruto)
             if not valor:
@@ -902,6 +1171,7 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         protocolo_modelo=None,
         id_documento_modelo=None,
         consultar_lupa_modelo=True,
+        numero="",
     ):
         """
         Cria um documento interno no processo informado.
@@ -957,10 +1227,10 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
 
         ids = {id_procedimento}
 
-        link_proc = self._link_trabalhar_na_caixa(id_procedimento)
+        link_proc = self._link_trabalhar_do_processo(id_procedimento, numero)
         if not link_proc:
             raise ErroInclusaoDocumento(
-                "Link de abertura do processo nao encontrado na caixa da unidade.",
+                "Link de abertura do processo nao encontrado (nem na caixa, nem pela pesquisa rapida).",
                 etapa="0_abrir_processo",
             )
         resp_proc, _ = self._ir("get", link_proc, ids_liberados=ids, timeout=30)
@@ -1106,7 +1376,9 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         )
         return m.group(1)
 
-    def editar_conteudo_documento(self, id_procedimento, id_documento, dados):
+    def editar_conteudo_documento(
+        self, id_procedimento, id_documento, dados, numero=""
+    ):
         """
         Mescla os dados da planilha no conteudo do documento e SALVA no SEI (mail merge).
 
@@ -1123,6 +1395,8 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
           7. POST em editor/editor_processar.php?acao=editor_salvar (confirma "OK").
 
         dados: {coluna da planilha: valor} (ver COLUNAS_MERGE).
+        numero: numero SEI do processo, usado SO para reabrir o processo quando
+        ele nao esta na pagina 1 da caixa (ver _link_trabalhar_do_processo).
         Retorna True quando o SEI confirma o salvamento; falhas viram ErroInclusaoDocumento.
         """
         id_procedimento = str(id_procedimento).strip()
@@ -1145,10 +1419,10 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         )
 
         # 1) Arvore do processo (ja visualizado na inclusao).
-        link_proc = self._link_trabalhar_na_caixa(id_procedimento)
+        link_proc = self._link_trabalhar_do_processo(id_procedimento, numero)
         if not link_proc:
             raise ErroInclusaoDocumento(
-                "Link de abertura do processo nao encontrado na caixa da unidade.",
+                "Link de abertura do processo nao encontrado (nem na caixa, nem pela pesquisa rapida).",
                 etapa="5_editor_montar",
             )
         resp_proc, _ = self._ir("get", link_proc, ids_liberados=ids, timeout=30)
@@ -1252,7 +1526,31 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
             if not qtde:
                 print("      AVISO: marcador nao encontrado no modelo.")
         texto_final = " ".join(payload[nome] for nome in partes)
-        remanescentes = [m for m in MARCADORES_DO_MODELO if m in texto_final]
+        # O documento traz um <style> com fonte embutida em base64, e esse
+        # base64 contem a sequencia "XX" ao acaso. Varrer o texto inteiro
+        # acusava "marcador remanescente" mesmo com o titulo ja preenchido.
+        # A trava olha o conteudo SEM o bloco de estilo; o payload continua
+        # sendo enviado completo, com a formatacao preservada.
+        sem_estilo = re.sub(r"<style\b.*?</style>", " ", texto_final,
+                            flags=re.I | re.S)
+        # O documento embute fonte em base64, e o base64 contem "XX" ao acaso.
+        sem_estilo = re.sub(r"base64,[A-Za-z0-9+/=\s]+", " ", sem_estilo)
+        remanescentes = [m for m in MARCADORES_DO_MODELO if m in sem_estilo]
+        # Sinal mais confiavel que procurar texto: a CONTAGEM das regras. Se
+        # uma regra obrigatoria casou zero vez, o marcador nao foi substituido,
+        # e isso vale mesmo quando o texto do marcador tem grafia diferente da
+        # lista acima.
+        faltando = [r for r in REGRAS_OBRIGATORIAS
+                    if not contador.get(r) and not (
+                        r == "Nº do termo (titulo)" and contador.get(
+                            "Nº do termo (titulo sem span)"))]
+        if faltando:
+            raise ErroInclusaoDocumento(
+                f"Regras de merge que nao casaram com este modelo: {faltando} "
+                "- o documento NAO foi salvo. O modelo da unidade deve ter "
+                "esses marcadores; ajuste as regras em REGRAS_MERGE.",
+                etapa="6_editor_salvar",
+            )
         if remanescentes:
             raise ErroInclusaoDocumento(
                 f"Marcadores do modelo ainda presentes apos o merge: {remanescentes} "
@@ -1412,7 +1710,8 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         return avisos
 
     def incluir_em_bloco_assinatura(
-        self, id_procedimento, id_documento, numero_bloco, disponibilizar=True
+        self, id_procedimento, id_documento, numero_bloco, disponibilizar=True,
+        numero="",
     ):
         """
         Inclui o documento no bloco de assinatura informado e o disponibiliza.
@@ -1450,10 +1749,10 @@ class InclusaoDocumentoSEI(APIExtratorSEI):
         )
 
         # 1) Arvore do processo e arvore com o documento selecionado.
-        link_proc = self._link_trabalhar_na_caixa(id_procedimento)
+        link_proc = self._link_trabalhar_do_processo(id_procedimento, numero)
         if not link_proc:
             raise ErroInclusaoDocumento(
-                "Link de abertura do processo nao encontrado na caixa da unidade.",
+                "Link de abertura do processo nao encontrado (nem na caixa, nem pela pesquisa rapida).",
                 etapa="7_bloco_escolher",
             )
         resp_proc, _ = self._ir("get", link_proc, ids_liberados=ids, timeout=30)
@@ -1602,33 +1901,115 @@ def carregar_dados_planilha(caminho, indice=0):
     Le o Excel e devolve {coluna: valor} da linha pedida (ver COLUNAS_MERGE).
     Aborta com sys.exit em coluna ausente, planilha vazia ou indice fora do
     intervalo.
+
+    Passa pela MESMA normalizacao de nomes do fluxo em lote (_renomear_colunas).
+    Antes esta funcao exigia o titulo exato ("Nº do termo") enquanto a outra
+    aceitava apelidos: dois modos de ler a mesma planilha no mesmo arquivo, e o
+    caminho de processo unico recusava arquivos que o lote aceitava.
     """
-    df = pd.read_excel(caminho)
+    bruta = pd.read_excel(caminho)
+    df = _renomear_colunas(bruta)
     faltantes = sorted({c for c in COLUNAS_MERGE if c not in df.columns})
     if faltantes:
         sys.exit(
             f"Colunas obrigatorias ausentes em {os.path.basename(caminho)}: {faltantes} "
-            f"(colunas lidas: {list(df.columns)})."
+            f"(colunas lidas: {list(bruta.columns)}).\n"
+            "Aceitas, por coluna:\n  "
+            + "\n  ".join(f"{c} -> {list(APELIDOS_COLUNAS[c])}" for c in faltantes)
         )
     if df.empty:
         sys.exit(f"Planilha sem linhas de dados: {caminho}")
     if not isinstance(indice, int) or indice < 0 or indice >= len(df):
         sys.exit(f"--linha {indice} fora do intervalo valido (0..{len(df) - 1}).")
     linha = df.iloc[indice]
-    return {
+    dados = {
         coluna: ("" if pd.isna(linha[coluna]) else str(linha[coluna]).strip())
         for coluna in COLUNAS_MERGE
     }
+    for coluna in COLUNAS_NUMERICAS:
+        if coluna in dados:
+            dados[coluna] = _sem_decimal_de_planilha(dados[coluna])
+    return dados
+
+
+def _chave_coluna(nome):
+    """
+    Reduz o titulo de uma coluna a uma forma comparavel.
+
+    "Nº do termo", "N° do termo", "No do termo" e "n_o_termo" viram a mesma
+    chave. E o que permite ler a planilha de outra unidade sem renomear nada:
+    o grafismo do titulo depende do teclado de quem montou a planilha, e antes
+    bastava um acento a menos para o programa recusar o arquivo inteiro.
+    """
+    texto = str(nome or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.replace("\u00ba", " ").replace("\u00b0", " ")
+    return re.sub(r"[^a-z0-9]+", "_", texto).strip("_")
+
+
+# Aceita varias grafias por coluna canonica. A primeira que existir na planilha
+# ganha; as demais sao apenas apelidos tambem aceitos. "Processo SEI" nao entra
+# no merge - serve so para localizar o processo de cada linha.
+APELIDOS_COLUNAS = {
+    "Nome Servidor": ("nome servidor", "nome", "servidor", "nome do servidor",
+                      "servico", "cedente"),
+    "MASP": ("masp", "matricula", "siap", "siape"),
+    "ADM": ("adm", "codigo adm"),
+    "Cargo": ("cargo", "sigla cargo"),
+    "Função": ("funcao", "funcao servidor", "descricao cargo"),
+    "Nº do termo": ("n do termo", "n termo", "numero do termo", "n_termo",
+                    # "n_o_termo"/"n o termo" sao o que o Excel costuma deixar
+                    # quando o cabecalho foi digitado com o "º" quebrado em
+                    # "o" + separador. A docstring de _chave_coluna ja prometia
+                    # essa equivalencia, mas a chave gerada ("n_o_termo")
+                    # nao batia com nenhuma das anteriores ("n_do_termo",
+                    # "n_termo"): a planilha era recusada sem motivo aparente.
+                    "n_o_termo", "n o termo", "nº termo", "nº do termo",
+                    # Planilha de outra unidade (CONTROLE DAS MOVIMENTACOES
+                    # HRJP) traz o cabecalho so como "Nº".
+                    "nº", "no",
+                    "termo"),
+    "Processo SEI": ("processo sei", "processo", "n processo", "numero processo",
+                     "sei"),
+}
+
+
+def _renomear_colunas(df):
+    """Devolve uma copia do DataFrame com as colunas no nome canonico."""
+    disponiveis = {}
+    for coluna in df.columns:
+        disponiveis.setdefault(_chave_coluna(coluna), coluna)
+
+    renomear = {}
+    for canonica, apelidos in APELIDOS_COLUNAS.items():
+        for apelido in (canonica,) + apelidos:
+            achada = disponiveis.get(_chave_coluna(apelido))
+            if achada is not None:
+                renomear[achada] = canonica
+                break
+    return df.rename(columns=renomear)
 
 
 def carregar_planilha(caminho):
-    """Le a planilha inteira e devolve a lista de linhas (uma por servidor)."""
-    df = pd.read_excel(caminho)
+    """
+    Le a planilha inteira e devolve a lista de linhas (uma por servidor).
+
+    O nome das colunas nao e mais obrigatorio ser escrito de uma unica forma.
+    Cada coluna canonica (COLUNAS_MERGE) e procurada por um conjunto de
+    apelidos, e a busca ignora maiusculas, acentos, "_" e espacos. Assim a
+    planilha de outra unidade abre com "NOME DO SERVIDOR", "Funcao" ou
+    "n_o_termo" sem ninguem precisar editar o codigo.
+    """
+    bruta = pd.read_excel(caminho)
+    df = _renomear_colunas(bruta)
     faltantes = sorted({c for c in COLUNAS_MERGE if c not in df.columns})
     if faltantes:
         sys.exit(
             f"Colunas obrigatorias ausentes em {os.path.basename(caminho)}: {faltantes} "
-            f"(colunas lidas: {list(df.columns)})."
+            f"(colunas lidas: {list(bruta.columns)}).\n"
+            "Aceitas, por coluna:\n  "
+            + "\n  ".join(f"{c} -> {list(APELIDOS_COLUNAS[c])}" for c in faltantes)
         )
     if df.empty:
         sys.exit(f"Planilha sem linhas de dados: {caminho}")
@@ -1638,6 +2019,9 @@ def carregar_planilha(caminho):
             coluna: ("" if pd.isna(linha[coluna]) else str(linha[coluna]).strip())
             for coluna in COLUNAS_MERGE
         }
+        for coluna in COLUNAS_NUMERICAS:
+            if coluna in dados:
+                dados[coluna] = _sem_decimal_de_planilha(dados[coluna])
         processo = ""
         if "Processo SEI" in df.columns and not pd.isna(linha["Processo SEI"]):
             processo = str(linha["Processo SEI"]).strip()
@@ -1691,8 +2075,8 @@ class _ResolvedorProcessos:
                     "achado": None,
                     "processo": self.args.processo or "(da CLI --id-procedimento)",
                 }
-            raise ValueError(
-                "a planilha nao tem 'Processo SEI' e nenhum --processo foi informado"
+            raise LinhaSemProcesso(
+                "'Processo SEI' em branco na planilha"
             )
 
         if numero in self._cache:
@@ -1707,13 +2091,23 @@ class _ResolvedorProcessos:
             self._cache[numero] = resultado
             return resultado
 
-        achado, encontrado = self.api._localizar_processo_na_caixa(numero)
+        achado, encontrado = self.api._localizar_processo_na_caixa(
+            numero, mesmo_assim=getattr(self.args, "mesmo_assim", False)
+        )
         if not encontrado:
             resultado = {
                 "id": None,
                 "achado": None,
                 "processo": numero,
-                "erro": f"processo {numero} nao encontrado na caixa da unidade",
+                "erro": (
+                    f"processo {numero} nao encontrado: a pesquisa rapida "
+                    f"localizou o processo, mas ele esta FORA da caixa da unidade "
+                    f"(sem marca de visualizado). Marque a opcao de abrir "
+                    f"processo NAO VISUALIZADO para prosseguir."
+                    if getattr(self.api, "_ultima_busca_localizou", False)
+                    else f"processo {numero} nao encontrado (nem na pesquisa "
+                         f"rapida, nem na caixa da unidade)"
+                ),
             }
             self._cache[numero] = resultado
             return resultado
@@ -1744,12 +2138,19 @@ def _preflight_lote(api, itens, args, id_procedimento_padrao=None, somente_plano
     resolvido = _ResolvedorProcessos(api, args, id_procedimento_padrao)
     por_id = {}
     falhas = []
+    ignoradas = []
     usados = {}  # numero do processo -> {"id": str, "linhas": int}
 
     for item in itens:
         indice = item["indice"]
         try:
             resultado = resolvido.resolver(item)
+        except LinhaSemProcesso as erro:
+            # Nao e falha: nao ha processo onde gravar. A linha e pulada, e o
+            # operador ve a lista no resumo para notar um eventual erro de
+            # digitacao.
+            ignoradas.append((indice, item["dados"]))
+            continue
         except ValueError as erro:
             falhas.append(f"linha {indice}: {erro}")
             continue
@@ -1760,10 +2161,28 @@ def _preflight_lote(api, itens, args, id_procedimento_padrao=None, somente_plano
         registro = usados.setdefault(resultado["processo"], {"id": resultado["id"], "linhas": 0})
         registro["linhas"] += 1
 
+    if ignoradas:
+        nomes = ", ".join(
+            f"{indice} ({d.get('Nome Servidor', '').strip()})" for indice, d in ignoradas[:40]
+        )
+        if len(ignoradas) > 40:
+            nomes += f", ... e mais {len(ignoradas) - 40}"
+        print(
+            f"\nIGNORADAS: {len(ignoradas)} linha(s) sem 'Processo SEI' - "
+            "nao ha processo onde incluir documento, entao nada e gravado nelas."
+        )
+        print(f"  linhas: {nomes}")
+
     print("\nPRE-VOO: conferindo processos antes de gravar")
     for numero, registro in usados.items():
         print(f"  {numero} -> id {registro['id']} ({registro['linhas']} linha(s))")
     print(f"  {len(usados)} processo(s) distinto(s) no lote.")
+
+    if not por_id and ignoradas:
+        sys.exit(
+            "Nenhuma linha da planilha tem 'Processo SEI' preenchido: nao ha "
+            "nenhum processo para_include. Confira se a coluna foi preenchida."
+        )
 
     if falhas:
         print("\nABORTADO no pre-voo - NENHUM documento foi criado:")
@@ -1774,6 +2193,9 @@ def _preflight_lote(api, itens, args, id_procedimento_padrao=None, somente_plano
     if somente_plano:
         print("\nPLANO (--plano): nenhuma gravacao sera feita. Resumo:")
         for item in itens:
+            if item["indice"] not in por_id:
+                # Linha sem 'Processo SEI': nada sera criado para ela.
+                continue
             d = item["dados"]
             print(
                 f"  linha {item['indice']:>3} | {item['processo'] or '(CLI)'} | "
@@ -1848,6 +2270,9 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
     por_id = _preflight_lote(api, itens, args, id_procedimento_padrao)
 
     concluidas = []
+    # Separada de "concluidas" de proposito: essa lista guarda
+    # tuplas e o resumo final desempacota em tres campos.
+    ignoradas_no_lote = []
     for posicao, item in enumerate(itens, start=1):
         indice = item["indice"]
         dados = item["dados"]
@@ -1859,10 +2284,24 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
         )
         print("=" * 78)
 
+        if indice not in por_id:
+            # Linha ignorada no pre-voo (sem 'Processo SEI'). Sem este teste
+            # o por_id[indice] levantaria KeyError aqui, DEPOIS do pre-voo
+            # ter saido bem - a falha apareceria como erro de programa, longe
+            # da causa real.
+            print(
+                f"\nLinha {indice} ignorada: 'Processo SEI' em branco "
+                f"({dados.get('Nome Servidor', '')}). Nada a fazer."
+            )
+            ignoradas_no_lote.append(indice)
+            continue
+
         id_procedimento = por_id[indice]
         try:
+            numero_processo = item.get("processo") or ""
             id_doc = api.incluir_documento_interno(
                 id_procedimento=id_procedimento,
+                numero=numero_processo,
                 id_serie=args.serie,
                 id_hipotese_legal=args.hipotese_legal,
                 texto_inicial=texto_inicial,
@@ -1873,7 +2312,9 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
                 dry_run=args.dry_run,
                 salvar_telas=args.salvar_telas,
             )
-            if not api.editar_conteudo_documento(id_procedimento, id_doc, dados):
+            if not api.editar_conteudo_documento(
+                id_procedimento, id_doc, dados, numero_processo
+            ):
                 raise ErroInclusaoDocumento("SEI nao confirmou o salvamento.", etapa="lote")
 
             # Ultima etapa do ciclo: o documento recem-mesclado entra nos blocos
@@ -1886,6 +2327,7 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
                     id_procedimento=id_procedimento,
                     id_documento=id_doc,
                     numero_bloco=numero_bloco,
+                    numero=numero_processo,
                     disponibilizar=args.disponibilizar_bloco,
                 )
                 print(
@@ -1909,6 +2351,11 @@ def executar_lote(api, args, id_procedimento_padrao, texto_inicial):
     for indice, nome, id_doc in concluidas:
         print(f"  linha {indice:>2} | documento {id_doc} | {nome}")
     print(f"\nTotal: {len(concluidas)} documento(s) criado(s) e mesclado(s).")
+    if ignoradas_no_lote:
+        print(
+            f"Ignoradas por falta de 'Processo SEI' ({len(ignoradas_no_lote)}): "
+            + ", ".join(str(i) for i in ignoradas_no_lote)
+        )
 
 
 def main(argv=None):
@@ -2105,7 +2552,9 @@ def main(argv=None):
     id_procedimento = args.id_procedimento
     if args.processo:
         print(f"Procurando o processo {args.processo} na caixa da unidade {args.unidade}...")
-        achado, encontrado = api._localizar_processo_na_caixa(args.processo)
+        achado, encontrado = api._localizar_processo_na_caixa(
+            args.processo, mesmo_assim=getattr(args, "mesmo_assim", False)
+        )
         if not encontrado:
             sys.exit(f"Processo {args.processo} nao encontrado na caixa da unidade {args.unidade}.")
         id_procedimento = achado.get("IdProtocolo") or achado.get("id_procedimento")
@@ -2161,7 +2610,10 @@ def main(argv=None):
             print(f"Mail Merge: {caminho_planilha} (linha {args.linha}):")
             for coluna, valor in dados_merge.items():
                 print(f"  {coluna} = {valor}")
-            if api.editar_conteudo_documento(id_procedimento, id_documento, dados_merge):
+            if api.editar_conteudo_documento(
+                id_procedimento, id_documento, dados_merge,
+                getattr(args, "processo", "") or "",
+            ):
                 print("Conteudo do documento mesclado e salvo no SEI.")
 
 

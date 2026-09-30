@@ -52,6 +52,8 @@ import sys
 import threading
 import traceback
 
+import tkinter
+
 import customtkinter as ctk
 from tkinter import TclError, filedialog, messagebox
 
@@ -74,7 +76,7 @@ SIMULAR = False
 # Grava o HTML de cada etapa em ruas_inclusao/ (so diagnostico). False = nao
 # deixa arquivos no disco do usuario; ligue True se algo falhar e precisar
 # ver a tela que o SEI devolveu.
-SALVAR_TELAS = False
+SALVAR_TELAS = True
 
 # Modos possiveis do botao do bloco. "Incluir e disponibilizar" so funciona
 # se o bloco tiver unidades/assinantes configurados no SEI; sem isso o SEI
@@ -89,7 +91,15 @@ HOVER_CLARO = "#36719F"
 HOVER_ESCURO = "#144870"
 HOVER_APAGADO = "#25506E"
 GRAY_APAGADO = "#6B7785"
-TEXTO_PADRAO = "#DCE4EE"  # cor normal de texto no tema escuro
+TEXTO_PADRAO = "#DCE4EE"     # cor normal de texto no tema escuro
+TEXTO_SECUNDARIO = "#9AA7B5"  # dicas e legendas, um tom abaixo do titulo
+FUNDO_TELA = "#242424"     # fundo do app e do canvas de rolagem
+COR_CARTAO = "#2E2E2E"     # fundo das secoes, um tom acima do app
+
+# Cor de fundo ORIGINAL de um CTkEntry, lida do tema ativo. E o que devolve o
+# campo a cor normal depois do modo "sem bloco" ter cinzado ele: passar uma
+# cor fixa aqui quebraria assim que o tema ou o modo de aparencia mudasse.
+COR_CAMPO = ctk.ThemeManager.theme["CTkEntry"]["fg_color"]
 
 # Terceiro caminho: cria e mescla o documento, mas NAO entra em bloco
 # nenhum - util quando o bloco e configurado depois, na mao, no SEI.
@@ -109,7 +119,36 @@ TEXTO_INICIAL = "D"                 # D = usa o Documento Modelo
 
 # Etiquetas da interface
 TITULO = "Inclusão Automatizada de Documentos SEI"
-LARGURA, ALTURA = 820, 1160
+SUBTITULO = "Cessao Especial - Mail Merge via planilha Excel"
+LARGURA, ALTURA = 860, 920
+
+# Grade da janela principal (column=0). As linhas sao faixas: cabecalho fixo,
+# corpo rolavel, log e rodape fixo. Os PESOS sao o que faz a tela crescer de
+# forma proporcional quando o operador maximiza - sem eles o conteudo fica
+# colado no topo e sobra um vao vazio embaixo.
+#
+# O corpo pesa MAIS que o log de proposito: e a area que precisa de espaco
+# (sao 4 cartoes empilhados) enquanto o log, com poucas linhas, sempre tem
+# sobra. Invertido, o operador rolaria a tela inteira para ler duas linhas.
+PESO_CORPO = 5
+PESO_LOG = 2
+
+# Medidas de respiro. Um unico valor para tudo e o que da o ar de "acabado":
+# nada de um cartao com 8px e o vizinho com 20.
+PAD_CARTAO = 22        # espaco externo entre um cartao e o proximo
+PEX_LINHA = 16         # espaco interno do cartao, nas laterais
+PEX_CAMPO = 14         # espaco interno do cartao, em cima/baixo
+LARG_CAMPO = 230       # largura de um campo de entrada (a das colunas duplas)
+ALT_CAMPO = 34         # altura de TODOS os campos de entrada
+ALT_BOTAO = 40         # altura dos botoes de acao (bloco e planilha)
+
+# Alturas MINIMAS de corpo e log. O CustomTkinter cria um CTkTextbox com 200px
+# e um canvas vazio com ~270px: se deixassemos esses defaults, cada faixa
+# ficaria "presa" nesse piso e o PESO da grade nao dividiria o espaco extra -
+# era o que deixava o log quase do tamanho do corpo. Pedir menos aqui deixa o
+# peso fazer o trabalho: o corpo cresce primeiro, o log recebe a sobra.
+ALT_CORPO = 200
+ALT_LOG = 90
 
 # =============================================================================
 #  Onde ficam os logs (LGPD)
@@ -220,13 +259,20 @@ class RedirecionadorConsole:
 def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
                      bloco1: str = "", bloco2: str = "",
                      modo: str = MODO_DISPONIBILIZAR,
-                     unidade: str = "", tipo: str = "", modelo: str = ""):
+                     unidade: str = "", tipo: str = "", modelo: str = "",
+                     mesmo_assim: bool = False):
     """
     Monta o argparse.Namespace que o executar_lote() do app4_inclusao.py espera.
 
     Nao alteramos o backend: os mesmos nomes de flag da CLI sao reproduzidos
     aqui como atributos. O teste scripts_write/testa_interface_gui.py confere
     que TODOS os atributos lidos pelo backend existem neste Namespace.
+
+    mesmo_assim: equivale ao --mesmo-assim da linha de comando. Vem DESLIGADO
+    por padrao de proposito: a regra de ouro n. 1 aborta processo "NAO
+    VISUALIZADO" (o vermelho da caixa) porque abrir a URL principal dele
+    dispara a contagem de prazo no SEI. Só a tela liga isso, e só quando o
+    operador marca a caixa e confirma o aviso.
     """
     return argparse.Namespace(
         planilha=planilha,
@@ -239,7 +285,8 @@ def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
         # existir, entao aqui o backend pode ir direto na escrita real.
         confirmar=True,
         dry_run=False,
-        mesmo_assim=False,
+        # Furador da trava de prazo, ligado pelo checkbox da tela.
+        mesmo_assim=bool(mesmo_assim),
         editar_documento=None,
         processo=None,
         id_procedimento=None,
@@ -250,7 +297,13 @@ def montar_args_lote(planilha: str, linha_inicio: int = 0, plano: bool = False,
         id_documento_modelo=None,
         sem_consultar_modelo=False,
         unidade=(unidade or "").strip(),
-        salvar_telas=False,
+        # Repassa a constante SALVAR_TELAS. Antes vinha False fixo e isso
+        # sobrescrevia o api.salvar_telas = SALVAR_TELAS feito no login:
+        # dentro de incluir_documento_interno o self.salvar_telas e reatribuido
+        # a partir deste argumento, entao o lote desligava o diagnostico e
+        # NENHUM HTML do editor era salvo - sem o 4_editor_montar nao ha como
+        # ver por que o merge nao substitui os marcadores no modelo real.
+        salvar_telas=SALVAR_TELAS,
         # Blocos de assinatura: IDs internos lidos da tela. Vazio = nao incluir.
         bloco1=(bloco1 or "").strip(),
         bloco2=(bloco2 or "").strip(),
@@ -276,11 +329,12 @@ class AppAutomacaoSEI(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title(TITULO)
-        self.geometry(f"{LARGURA}x{ALTURA}")
-        # Redimensionavel de proposito: o console inferior e o lugar onde o
-        # usuario acompanha o progresso de cada linha da planilha, e ele
-        # precisa de espaco quando o lote e grande.
-        self.minsize(LARGURA, ALTURA)
+        # A geometria final (tamanho + posicao centralizada) so pode ser
+        # calculada DEPOIS que a janela existir, senao o Tk ainda nao sabe as
+        # medidas da tela. _centrar_janela() faz isso no primeiro "_" do laco.
+        self._centrar_janela()
+        # MEXIVEL: se o monitor for baixo, o operador arrasta e alcanca o
+        # botao. Nao ha minsize porque ele IMPOS a altura e anula o geometry.
         # O tema tem que vir ANTES de qualquer widget: definido depois, o
         # CustomTkinter redesenha a tela e o Entry da senha perde o "show".
         ctk.set_appearance_mode("dark")
@@ -304,54 +358,255 @@ class AppAutomacaoSEI(ctk.CTk):
         self.log.log("Sua senha e usada so nesta execucao: nada e gravado no PC.")
 
     # ------------------------------------------------------------------ layout
+    def _centrar_janela(self):
+        """
+        Abre a janela no CENTRO da tela, e nunca maior que o monitor.
+
+        Sem isso o .exe abre sempre no canto superior esquerdo.
+
+        CUIDADO COM O DPI. O CustomTkinter sobrescreve geometry() e multiplica
+        a largura e a altura pelo fator de escala da tela (125% num monitor
+        Full HD), mas NAO multiplica a posicao x/y. Misturar as duas regras da
+        em contas erradas: a janela abre maior que a tela ou desalinhada.
+
+        Por isso aqui chamamos o geometry() do TK puro, que nao aplica escala
+        nenhuma, e fazemos toda a conta em PIXELS REAIS de tela:
+
+            largura = min(LARGURA x fator, tela - margem)
+
+        Assim o CustomTkinter continua dimensionando os widgets internos pelo
+        fator (letras e botoes do tamanho certo) e a janela em si abre
+        exatamente do tamanho que pedimos, centralizada, sem passar da tela.
+        """
+        self.update_idletasks()
+        fator = ctk.ScalingTracker.get_window_scaling(self)
+        tela_l = self.winfo_screenwidth()   # pixels reais da area de trabalho
+        tela_a = self.winfo_screenheight()
+        # 60px de folga: sobram as bordas e a barra de tarefas.
+        largura = max(760, min(LARGURA * fator, tela_l - 60))
+        altura = max(600, min(ALTURA * fator, tela_a - 60))
+        x = int((tela_l - largura) / 2)
+        y = int((tela_a - altura) / 2)
+        # tkinter.Tk.geometry e o metodo ORIGINAL: nao passa pela regra de
+        # escala do CustomTkinter, entao x/y batem com a conta acima.
+        tkinter.Tk.geometry(self, f"{int(largura)}x{int(altura)}+{x}+{y}")
+
+    def _criar_area_rolavel(self):
+        """
+        Area rolavel para o conteudo da tela.
+
+        O conteudo completo tem mais de 700px, e nem todo monitor tem isso. Em
+        vez de cortar campos ou encolher tudo ate ficar ilegivel, o conteudo
+        rola - e a barra aparece SO quando e preciso. O rodape (faixa de modo +
+        botao Iniciar) fica FORA da rolagem, sempre visivel: e o unico jeito de
+        o operador nao ficar preso sem conseguir apertar Iniciar.
+        """
+        # container: canvas + scrollbar, com a mesma largura
+        self._container = ctk.CTkFrame(self, fg_color="transparent")
+        self._container.grid(row=1, column=0, padx=PAD_CARTAO, pady=(0, 6),
+                             sticky="nsew")
+        # A area rolavel ocupa a faixa do meio e CRESCE com a janela: e o peso
+        # da linha que distribui o espaco extra quando o operador maximiza.
+        # Sem este weight o canvas ficaria com a altura do conteudo e sobraria
+        # um vao vazio entre ele e o log.
+        self.grid_rowconfigure(1, weight=PESO_CORPO, minsize=ALT_CORPO)
+        self._container.grid_rowconfigure(0, weight=1)
+        self._container.grid_columnconfigure(0, weight=1)
+
+        self._canvas = tkinter.Canvas(
+            self._container, highlightthickness=0, bd=0,
+            background=FUNDO_TELA, height=ALT_CORPO,
+        )
+        self._scroll = ctk.CTkScrollbar(
+            self._container, command=self._canvas.yview
+        )
+        self._scroll.grid(row=0, column=1, sticky="ns")
+        self._canvas.configure(yscrollcommand=self._scroll.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._container.grid_columnconfigure(0, weight=1)
+
+        # o "pai" de todas as secoes passa a ser o canvas
+        self._conteudo = ctk.CTkFrame(self._canvas, fg_color="transparent")
+        # O conteudo e um frame comum: sem peso na coluna 0 ele ficaria com a
+        # largura do CACHORRO (o texto mais longo) e os cartoes nao acompanhariam
+        # o canvas ao redimensionar - foi o que deixou a tela com uma coluna
+        # estreita a esquerda e um vao vazio a direita.
+        self._conteudo.grid_columnconfigure(0, weight=1)
+        self._janela = self._canvas.create_window(
+            (0, 0), window=self._conteudo, anchor="nw"
+        )
+        self._conteudo.bind(
+            "<Configure>",
+            lambda _e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
+        )
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfigure(self._janela, width=e.width),
+        )
+        # roda com a roda do mouse quando o cursor esta sobre o conteudo
+        self._canvas.bind_all("<MouseWheel>", self._rolar_com_roda, add="+")
+        # Centraliza depois que o layout existir: so entao o Tk conhece as
+        # medidas reais da tela e o tamanho minimo do conteudo.
+        self.after(0, self._centrar_janela)
+        return self._conteudo
+
+    def _rolar_com_roda(self, evento):
+        """
+        Rola a area de campos com a roda do mouse.
+
+        O log tem a PRÓPRIA barra de rolagem, entao a roda sobre ele precisa
+        rolar o log e nao o corpo - senao o operador tentando ler o log acaba
+        deslocando a tela de cima, sem entender por que os campos mexeram.
+        Por isso o evento so e tratado quando o cursor esta sobre o corpo.
+        """
+        if not (self._canvas.winfo_exists() and self._canvas.winfo_ismapped()):
+            return
+        if self._cursor_sobre_o_log(evento):
+            return
+        self._canvas.yview_scroll(int(-1 * (evento.delta / 120)), "units")
+
+    def _cursor_sobre_o_log(self, evento):
+        """True quando o ponteiro do mouse esta em cima do console."""
+        try:
+            alvo = self.winfo_containing(evento.x_root, evento.y_root)
+        except (KeyError, TclError):
+            return False
+        # Sobe a arvore de pais: o ponteiro pode estar no texto interno do
+        # CTkTextbox, e nao no console em si.
+        while alvo is not None and alvo is not self:
+            if alvo is self.console:
+                return True
+            alvo = getattr(alvo, "master", None)
+        return False
+
     def _montar_layout(self):
+        """
+        Monta a tela em quatro faixas verticais (uma linha da grade cada).
+
+        row 0  cabecalho  - titulo e subtitulo, empilhados e centralizados
+        row 1  corpo      - campos, dentro da area rolavel (cresce com a janela)
+        row 2  log        - console, ocupa toda a largura e cresce ao maximizar
+        row 3  faixa      - aviso do modo de gravacao
+        row 4  rodape     - botao Iniciar, sempre visivel
+
+        Os PESOS so ficam nas linhas 1 e 2: sao elas que dividem o espaco
+        extra quando o operador maximiza. Titulo, faixa e botao tem peso 0
+        porque nao devem esticar - so precisam ficar centralizados.
+        """
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(6, weight=1)
+        self._secao_cabecalho()
+
+        # Conteudo numa area rolavel: a barra so aparece quando e preciso. E no
+        # rodape, FORA da rolagem, ficam a faixa de modo e o botao Iniciar -
+        # e o que garante que o operador sempre consegue apertar Iniciar.
+        pai = self._criar_area_rolavel()
+        for nome in ("_secao_credenciais", "_secao_unidade", "_secao_planilha",
+                     "_secao_bloco"):
+            getattr(self, nome)(pai)
+        self._secao_console()
+        self._secao_botao()
+
+    def _secao_cabecalho(self):
+        """
+        Titulo e subtitulo.
+
+        Os dois ficam num frame proprio, em LINHAS SEPARADAS e centralizados.
+        Antes eles disputavam a mesma celula da grade (um colado a esquerda com
+        sticky="w", o outro a direita com sticky="e") e, quando a janela
+        ficava estreita, o subtitulo subia por cima do titulo. Empilhados em
+        linhas diferentes, um nunca empurra o outro.
+        """
+        cabecalho = ctk.CTkFrame(self, fg_color="transparent")
+        cabecalho.grid(row=0, column=0, padx=PAD_CARTAO, pady=(16, 2), sticky="ew")
+        cabecalho.grid_columnconfigure(0, weight=1)
 
         titulo = ctk.CTkLabel(
-            self,
-            text="Inclusão Automatizada de Documentos SEI",
-            font=ctk.CTkFont(size=24, weight="bold"),
+            cabecalho,
+            text=TITULO,
+            font=ctk.CTkFont(size=22, weight="bold"),
         )
-        titulo.grid(row=0, column=0, padx=24, pady=(24, 0), sticky="w")
-        sub = ctk.CTkLabel(self, text="Cessao Especial — Mail Merge via planilha Excel")
-        sub.grid(row=1, column=0, padx=24, pady=(0, 18), sticky="w")
+        titulo.grid(row=0, column=0, sticky="ew")
 
-        self._secao_credenciais()   # 2
-        self._secao_unidade()       # 3
-        self._secao_planilha()      # 4
-        self._secao_bloco()         # 5
-        self._secao_console()       # 6
-        self._secao_botao()         # 7 e 8
+        sub = ctk.CTkLabel(
+            cabecalho,
+            text=SUBTITULO,
+            font=ctk.CTkFont(size=13),
+            text_color=TEXTO_SECUNDARIO,
+        )
+        sub.grid(row=1, column=0, pady=(2, 0), sticky="ew")
 
-    def _secao_credenciais(self):
-        quadro = ctk.CTkFrame(self, corner_radius=10)
-        quadro.grid(row=2, column=0, padx=24, pady=(0, 12), sticky="ew")
-        quadro.grid_columnconfigure(1, weight=1)
+    def _novo_cartao(self, pai, linha, titulo_texto):
+        """
+        Cria um cartao de secao ja posicionado e devolve o quadro interno.
 
-        rotulo = ctk.CTkLabel(quadro, text="Usuario do SEI:", font=ctk.CTkFont(weight="bold"))
-        rotulo.grid(row=0, column=0, padx=(14, 8), pady=(12, 4), sticky="w")
-        self.entrada_usuario = ctk.CTkEntry(quadro, placeholder_text="SEI_USUARIO")
-        self.entrada_usuario.grid(row=0, column=1, padx=(0, 14), pady=(12, 4), sticky="ew")
+        Todo bloco da tela nasce daqui, e e o que mantem o respiro e o
+        alinhamento iguais em todas as secoes: mesma borda, mesmo espaco entre
+        um cartao e o seguinte, mesma margem interna. As duas colunas internas
+        tem o mesmo peso E o mesmo "uniform", o que faz os campos de um par
+        (Usuario/Senha, Tipo/Modelo, Bloco 1/Bloco 2) ficarem com larguras
+        IGUAIS, mesmo que o texto de um deles seja maior que o do outro.
+        """
+        cartao = ctk.CTkFrame(pai, corner_radius=12, fg_color=COR_CARTAO)
+        cartao.grid(row=linha, column=0, padx=PAD_CARTAO, pady=(0, PAD_CARTAO),
+                    sticky="ew")
+        cartao.grid_columnconfigure((0, 1), weight=1, uniform="par")
+
+        if titulo_texto:
+            rotulo = ctk.CTkLabel(
+                cartao, text=titulo_texto, font=ctk.CTkFont(weight="bold"),
+            )
+            rotulo.grid(row=0, column=0, columnspan=2, padx=PEX_LINHA,
+                        pady=(PEX_CAMPO, 6), sticky="w")
+
+        quadro = ctk.CTkFrame(cartao, fg_color="transparent")
+        quadro.grid(row=1, column=0, columnspan=2, padx=PEX_LINHA,
+                    pady=(0, PEX_CAMPO), sticky="ew")
+        quadro.grid_columnconfigure((0, 1), weight=1, uniform="par")
+        return quadro
+
+    def _rotulo(self, pai, texto):
+        """
+        Rotulo de campo, com o mesmo peso e a mesma cor em toda a tela.
+
+        Passa o texto como "text=" de proposito: o primeiro argumento do
+        CTkLabel e o "master", e escrever ctk.CTkLabel("Unidade:") colocaria
+        a string no lugar do pai e a tela nem subiria.
+        """
+        return ctk.CTkLabel(
+            pai, text=texto, font=ctk.CTkFont(weight="bold"), anchor="w",
+        )
+
+    def _secao_credenciais(self, pai):
+        quadro = self._novo_cartao(pai, 0, "Credenciais do SEI")
+
+        # Usuario e Senha lado a lado: sao a mesma coisa (o par login/senha), o
+        # operador preenche um depois do outro, entao ficam na mesma linha e
+        # com a mesma largura.
+        rotulo = self._rotulo(quadro, "Usuario do SEI:")
+        rotulo.grid(row=0, column=0, pady=(0, 4), sticky="w")
+        self.entrada_usuario = ctk.CTkEntry(
+            quadro, placeholder_text="SEI_USUARIO", height=ALT_CAMPO,
+        )
+        self.entrada_usuario.grid(row=1, column=0, padx=(0, 6), sticky="ew")
         self.entrada_usuario.bind("<Return>", lambda _e: self.entrada_senha.focus_set())
 
-        rotulo = ctk.CTkLabel(quadro, text="Senha do SEI:", font=ctk.CTkFont(weight="bold"))
-        rotulo.grid(row=1, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        rotulo = self._rotulo(quadro, "Senha do SEI:")
+        rotulo.grid(row=0, column=1, padx=(6, 0), pady=(0, 4), sticky="w")
         # show="*": a senha nunca aparece na tela nem em print/print_rastreio.
         self.entrada_senha = ctk.CTkEntry(
-            quadro, show="*", placeholder_text="Senha do SEI"
+            quadro, show="*", placeholder_text="Senha do SEI", height=ALT_CAMPO,
         )
         # O customtkinter 6.0.0 perde o "show" durante o proprio __init__ do
         # CTkEntry (o Entry interno ja nasce sem ele). Sem esta reaplicacao a
         # senha apareceria em letras na tela - por isso conferimos de novo.
         self.entrada_senha._entry.configure(show="*")
-        self.entrada_senha.grid(row=1, column=1, padx=(0, 14), pady=(0, 12), sticky="ew")
+        self.entrada_senha.grid(row=1, column=1, padx=(6, 0), sticky="ew")
 
         # Ao sair da senha, detecta a unidade: caminho mais natural para o
         # usuario - digita usuario, senha, e a unidade aparece sozinha.
         self.entrada_senha.bind("<FocusOut>", lambda _e: self._detectar_unidade())
 
-    def _secao_unidade(self):
+    def _secao_unidade(self, pai):
         """
         Unidade (detectada no login) + Tipo e Modelo do documento.
 
@@ -360,30 +615,42 @@ class AppAutomacaoSEI(ctk.CTk):
         cada unidade tem os seus - e sao obrigatorios, ja que sem Tipo nao ha
         qual serie criar e sem Modelo o SEI abriria um documento em branco.
         """
-        quadro = ctk.CTkFrame(self, corner_radius=10)
-        quadro.grid(row=3, column=0, padx=24, pady=(0, 12), sticky="ew")
-        quadro.grid_columnconfigure(1, weight=1)
+        quadro = self._novo_cartao(pai, 1, "Unidade e tipo do documento")
 
-        rot = ctk.CTkLabel(quadro, text="Unidade:", font=ctk.CTkFont(weight="bold"))
-        rot.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
+        # Unidade ocupa a linha INTEIRA: e o unico campo desta secao cujo texto
+        # e longo e imprevisivel ("DSGDAT/SEDI/DSGCONT/..."), entao espremer
+        # numa metade da linha so criaria rolagem dentro do campo.
+        rot = self._rotulo(quadro, "Unidade:")
+        rot.grid(row=0, column=0, columnspan=2, pady=(0, 4), sticky="w")
         self.entrada_unidade = ctk.CTkEntry(
-            quadro, placeholder_text="detectada no login"
+            quadro, height=ALT_CAMPO,
         )
-        self.entrada_unidade.grid(row=0, column=1, padx=(0, 14), pady=(12, 6), sticky="ew")
+        # Ja nasce com o ALVO FIXO (UNIDADE_ALVO), e nao com a unidade em que
+        # o login caiu. A deteccao no login e sobrescrita aqui de proposito:
+        # o SEI devolve a ultima unidade acessada, que muda de sessao para
+        # sessao, e usar esse valor como destino fazia o programa gravar na
+        # unidade errada sem nenhum aviso.
+        from scripts_read.app3 import UNIDADE_ALVO
+        self.entrada_unidade.insert(0, UNIDADE_ALVO)
+        self.entrada_unidade.grid(row=1, column=0, columnspan=2,
+                                  pady=(0, 12), sticky="ew")
 
-        rot = ctk.CTkLabel(quadro, text="Tipo:", font=ctk.CTkFont(weight="bold"))
-        rot.grid(row=1, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        # Tipo e Modelo sao o par "que documento criar" - mesma linha, mesma
+        # largura, preenchidos no mesmo momento.
+        rot = self._rotulo(quadro, "Tipo:")
+        rot.grid(row=2, column=0, pady=(0, 4), sticky="w")
         self.entrada_tipo = ctk.CTkEntry(
-            quadro, placeholder_text="id do tipo (ex.: 4110)"
+            quadro, placeholder_text="id do tipo (ex.: 4110)", height=ALT_CAMPO,
         )
-        self.entrada_tipo.grid(row=1, column=1, padx=(0, 14), pady=(0, 4), sticky="ew")
+        self.entrada_tipo.grid(row=3, column=0, padx=(0, 6), sticky="ew")
 
-        rot = ctk.CTkLabel(quadro, text="Modelo:", font=ctk.CTkFont(weight="bold"))
-        rot.grid(row=2, column=0, padx=(14, 8), pady=(0, 4), sticky="w")
+        rot = self._rotulo(quadro, "Modelo:")
+        rot.grid(row=2, column=1, padx=(6, 0), pady=(0, 4), sticky="w")
         self.entrada_modelo = ctk.CTkEntry(
-            quadro, placeholder_text="protocolo do Documento Modelo"
+            quadro, placeholder_text="protocolo do Documento Modelo",
+            height=ALT_CAMPO,
         )
-        self.entrada_modelo.grid(row=2, column=1, padx=(0, 14), pady=(0, 4), sticky="ew")
+        self.entrada_modelo.grid(row=3, column=1, padx=(6, 0), sticky="ew")
 
         dica = ctk.CTkLabel(
             quadro,
@@ -391,56 +658,126 @@ class AppAutomacaoSEI(ctk.CTk):
                  "Modelo: abra um documento do tipo e copie o protocolo "
                  "(ex.: 0000.00.0000000/0000-00).",
             anchor="w", justify="left", font=ctk.CTkFont(size=11),
+            text_color=TEXTO_SECUNDARIO,
         )
-        dica.grid(row=3, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
+        dica.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="w")
 
-        # Aponta que a unidade ainda nao foi detectada.
-        self.entrada_tipo.bind("<FocusOut>", lambda _e: self._validar_documento())
-        self.entrada_modelo.bind("<FocusOut>", lambda _e: self._validar_documento())
+        # SEM validacao ao sair do campo (de proposito): ela reclamava de Tipo
+        # e Modelo vazios no instante em que o operador saia de um campo para
+        # preencher o outro, antes de ele ter chance de digitar. Hoje a
+        # conferencia acontece so em iniciar_automacao, via
+        # _pedir_unidade_tipo_modelo(), que mostra os tres campos que faltam
+        # de uma vez - em vez de tres erros soltos durante o preenchimento.
 
-    def _secao_planilha(self):
-        quadro = ctk.CTkFrame(self, corner_radius=10)
-        quadro.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="ew")
-        quadro.grid_columnconfigure(0, weight=1)
+    def _secao_planilha(self, pai):
+        quadro = self._novo_cartao(pai, 2, "Planilha (mail merge)")
 
+        # Botao e nome do arquivo na MESMA linha, com o nome encostado no
+        # botao e ocupando todo o resto. Isso exige um quadro proprio: o
+        # cartao divide a linha em duas METADES iguais (o "uniform" das
+        # seções com pares de campos), o que deixaria o nome flutuando no meio
+        # da tela, a uns 200px do botao. Aqui a coluna 0 tem a largura do botao
+        # e a coluna 1 fica com o que sobrar.
         linha = ctk.CTkFrame(quadro, fg_color="transparent")
-        linha.grid(row=0, column=0, padx=14, pady=(12, 6), sticky="ew")
-        linha.grid_columnconfigure(0, weight=1)
+        linha.grid(row=0, column=0, columnspan=2, sticky="ew")
+        linha.grid_columnconfigure(1, weight=1)
 
         self.botao_planilha = ctk.CTkButton(
-            linha, text="Selecionar Planilha Excel", width=210, height=34,
-            fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
+            linha, text="Selecionar Planilha Excel", width=LARG_CAMPO,
+            height=ALT_BOTAO, fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
             command=self.selecionar_planilha,
         )
-        self.botao_planilha.grid(row=0, column=0, padx=(0, 10), sticky="w")
+        self.botao_planilha.grid(row=0, column=0, padx=(0, 12), sticky="w")
         self.rotulo_planilha = ctk.CTkLabel(
-            linha, text="Nenhuma planilha selecionada", anchor="w"
+            linha, text="Nenhuma planilha selecionada", anchor="w",
+            justify="left", text_color=TEXTO_SECUNDARIO,
         )
-        self.rotulo_planilha.grid(row=0, column=1, sticky="ew")
+        self.rotulo_planilha.grid(row=0, column=1, pady=(0, 10), sticky="ew")
 
         self.rotulo_colunas = ctk.CTkLabel(
-            quadro, text="", anchor="w", font=ctk.CTkFont(size=11), wraplength=680, justify="left"
+            quadro, text="", anchor="w", font=ctk.CTkFont(size=11), justify="left",
+            text_color=TEXTO_SECUNDARIO,
         )
-        self.rotulo_colunas.grid(row=1, column=0, padx=14, pady=(0, 12), sticky="w")
-
-    def _secao_bloco(self):
-        quadro = ctk.CTkFrame(self, corner_radius=10)
-        quadro.grid(row=4, column=0, padx=24, pady=(0, 12), sticky="ew")
-        quadro.grid_columnconfigure(1, weight=1)
-
-        rotulo = ctk.CTkLabel(
-            quadro, text="Bloco 1:", font=ctk.CTkFont(weight="bold")
+        # O wraplength acompanha a largura real do cartao a cada
+        # redimensionamento: fixo em 680, o texto cortava numa janela larga e
+        # sobrava linha vazia numa estreita.
+        self.rotulo_colunas.bind(
+            "<Configure>",
+            lambda e: self.rotulo_colunas.configure(wraplength=max(280, e.width - 4)),
         )
-        rotulo.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
-        self.entrada_bloco = ctk.CTkEntry(quadro, placeholder_text="ID do Bloco 1")
-        self.entrada_bloco.grid(row=0, column=1, padx=(0, 14), pady=(12, 6), sticky="ew")
+        self.rotulo_colunas.grid(row=1, column=0, columnspan=2, sticky="w")
 
-        rotulo = ctk.CTkLabel(
-            quadro, text="Bloco 2:", font=ctk.CTkFont(weight="bold")
+        # Furador da trava de NAO VISUALIZADO (o "mesmo_assim" da linha de
+        # comando).
+        #
+        # O SEI pinta de VERMELHO o processo que este usuario ainda NAO abriu,
+        # e abrir a URL principal dele INICIA A CONTAGEM DE PRAZO no servidor.
+        # A regra de ouro n. 1 aborta esses processos justamente por isso. Este
+        # checkbox existe para os casos em que abrir e legitimo e a pessoa
+        # assume o risco: por isso fica DESLIGADO por default, mostra o aviso
+        # em vermelho embaixo, e a confirmacao final repete a advertencia.
+        self.check_abrir_nao_visualizado = ctk.CTkCheckBox(
+            quadro,
+            text="Abrir processo NAO VISUALIZADO (vermelho)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            checkbox_width=20, checkbox_height=20, corner_radius=6,
+            fg_color=AZUL_APAGADO, hover_color=HOVER_APAGADO,
+            border_color=GRAY_APAGADO, text_color=TEXTO_PADRAO,
+            command=self._pintar_aviso_prazo,
         )
-        rotulo.grid(row=1, column=0, padx=(14, 8), pady=(0, 8), sticky="w")
-        self.entrada_bloco2 = ctk.CTkEntry(quadro, placeholder_text="ID do Bloco 2")
-        self.entrada_bloco2.grid(row=1, column=1, padx=(0, 14), pady=(0, 8), sticky="ew")
+        self.check_abrir_nao_visualizado.grid(
+            row=2, column=0, columnspan=2, pady=(14, 0), sticky="w",
+        )
+        self.rotulo_aviso_prazo = ctk.CTkLabel(
+            quadro, text="", anchor="w", justify="left",
+            font=ctk.CTkFont(size=11), text_color="#e8a0a0",
+        )
+        self.rotulo_aviso_prazo.grid(
+            row=3, column=0, columnspan=2, pady=(4, 0), sticky="w",
+        )
+        self._pintar_aviso_prazo()
+
+    def _pintar_aviso_prazo(self):
+        """
+        Mostra ou esconde o alerta de prazo, conforme o checkbox.
+
+        O aviso so aparece com o checkbox LIGADO, e diz exatamente o que o
+        programa vai fazer: abrir processo que ninguem leu e disparar a
+        contagem de prazo no SEI, sem o responsavel pelo processo saber.
+        """
+        caixa = getattr(self, "check_abrir_nao_visualizado", None)
+        if caixa is None:
+            return
+        if caixa.get():
+            self.rotulo_aviso_prazo.configure(
+                text="ATENCAO: abrir um processo NAO VISUALIZADO (vermelho) "
+                     "INICIA A CONTAGEM DE PRAZO no SEI e nao da para desfazer. "
+                     "No lote, isso vale para TODOS os processos vermelhos da "
+                     "planilha."
+            )
+        else:
+            self.rotulo_aviso_prazo.configure(text="")
+
+    def _secao_bloco(self, pai):
+        # Row 5: a planilha ocupa a 4. Este bloco usava a MESMA row e o Tkinter
+        # empilhava os dois - o bloco cobria o botao de escolher o Excel.
+        quadro = self._novo_cartao(pai, 3, "Bloco de assinatura")
+
+        # Bloco 1 e Bloco 2 sao o mesmo par: mesma linha, mesma largura (o
+        # "uniform" do cartao divide a linha em duas metades iguais).
+        rotulo = self._rotulo(quadro, "Bloco 1:")
+        rotulo.grid(row=0, column=0, pady=(0, 4), sticky="w")
+        self.entrada_bloco = ctk.CTkEntry(
+            quadro, placeholder_text="ID do Bloco 1", height=ALT_CAMPO,
+        )
+        self.entrada_bloco.grid(row=1, column=0, padx=(0, 6), pady=(0, 10), sticky="ew")
+
+        rotulo = self._rotulo(quadro, "Bloco 2:")
+        rotulo.grid(row=0, column=1, padx=(6, 0), pady=(0, 4), sticky="w")
+        self.entrada_bloco2 = ctk.CTkEntry(
+            quadro, placeholder_text="ID do Bloco 2", height=ALT_CAMPO,
+        )
+        self.entrada_bloco2.grid(row=1, column=1, padx=(6, 0), pady=(0, 10), sticky="ew")
 
         # O valor e o ID interno do bloco (o "value" da opcao na tela do SEI,
         # ex.: 7712033), nao o numero de exibicao. O backend confere contra a
@@ -450,9 +787,10 @@ class AppAutomacaoSEI(ctk.CTk):
             quadro,
             text="ID interno do bloco, como aparece na tela do SEI. "
                  "Deixe vazio para nao incluir.",
-            anchor="w", font=ctk.CTkFont(size=11),
+            anchor="w", justify="left", font=ctk.CTkFont(size=11),
+            text_color=TEXTO_SECUNDARIO,
         )
-        dica.grid(row=2, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="w")
+        dica.grid(row=2, column=0, columnspan=2, pady=(0, 14), sticky="w")
 
         for entrada in (self.entrada_bloco, self.entrada_bloco2):
             entrada.bind("<Return>", lambda _e: self._registrar_bloco())
@@ -461,36 +799,39 @@ class AppAutomacaoSEI(ctk.CTk):
         # Dois botoes porque sao duas acoes diferentes do SEI: "Incluir" so
         # coloca o documento no bloco; "Incluir e disponibilizar" tambem envia
         # para assinatura e REQUER que o bloco tenha unidades configuradas.
+        # "uniform" garante a mesma largura: o texto do primeiro e bem mais
+        # curto que o do segundo, e sem isso o botao ficava visivelmente menor.
         acoes = ctk.CTkFrame(quadro, fg_color="transparent")
-        acoes.grid(row=3, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="ew")
-        acoes.grid_columnconfigure((0, 1), weight=1)
+        acoes.grid(row=3, column=0, columnspan=2, pady=(0, 8), sticky="ew")
+        acoes.grid_columnconfigure((0, 1), weight=1, uniform="acao")
         self.botao_incluir = ctk.CTkButton(
             acoes,
             text="Incluir documento",
+            height=ALT_BOTAO,
             command=lambda: self._escolher_modo(MODO_INCLUIR),
             font=ctk.CTkFont(weight="bold"),
         )
-        self.botao_incluir.grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        self.botao_incluir.grid(row=0, column=0, padx=(0, 4), sticky="ew")
         self.botao_disponibilizar = ctk.CTkButton(
             acoes,
             text="Incluir e disponibilizar",
+            height=ALT_BOTAO,
             command=lambda: self._escolher_modo(MODO_DISPONIBILIZAR),
             font=ctk.CTkFont(weight="bold"),
             fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
         )
-        self.botao_disponibilizar.grid(row=0, column=1, padx=(5, 0), sticky="ew")
+        self.botao_disponibilizar.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # Terceiro caminho: nenhum bloco. Os campos ficam cinzas e travados,
         # para ninguem acreditar que o numero digitado sera usado.
         self.botao_sem_bloco = ctk.CTkButton(
             quadro,
             text="Nao incluir em bloco de assinatura",
+            height=ALT_BOTAO,
             command=lambda: self._escolher_modo(MODO_SEM_BLOCO),
             font=ctk.CTkFont(),
         )
-        self.botao_sem_bloco.grid(
-            row=4, column=0, columnspan=2, padx=14, pady=(0, 12), sticky="ew"
-        )
+        self.botao_sem_bloco.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.modo_bloco = MODO_DISPONIBILIZAR
         self._pintar_modo()
 
@@ -515,11 +856,17 @@ class AppAutomacaoSEI(ctk.CTk):
             # escrito ali nao sera usado.
             for entrada in (self.entrada_bloco, self.entrada_bloco2):
                 entrada.configure(state="disabled", text_color=GRAY_APAGADO)
+            # Os CAMPOS nao sao botoes e nao aceitam "hover_color": passar o
+            # mesmo argumento para os dois tipos levanta ValueError e a tela
+            # trava no clique. Cada grupo recebe so o que o seu widget aceita -
+            # o efeito visual (cinza e travado) e o mesmo.
             for botao in (self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco, self.entrada_unidade,
-                       self.entrada_tipo, self.entrada_modelo):
+                          self.botao_sem_bloco):
                 botao.configure(fg_color=AZUL_APAGADO, hover_color=HOVER_APAGADO,
                                 border_width=0, state="disabled")
+            for entrada in (self.entrada_unidade, self.entrada_tipo,
+                            self.entrada_modelo):
+                entrada.configure(fg_color=AZUL_APAGADO, state="disabled")
             return
 
         self.botao_sem_bloco.configure(
@@ -528,9 +875,11 @@ class AppAutomacaoSEI(ctk.CTk):
         for entrada in (self.entrada_bloco, self.entrada_bloco2):
             entrada.configure(state="normal", text_color=TEXTO_PADRAO)
         for botao in (self.botao_incluir, self.botao_disponibilizar,
-                       self.botao_sem_bloco, self.entrada_unidade,
-                       self.entrada_tipo, self.entrada_modelo):
+                      self.botao_sem_bloco):
             botao.configure(state="normal")
+        for entrada in (self.entrada_unidade, self.entrada_tipo,
+                        self.entrada_modelo):
+            entrada.configure(state="normal", fg_color=COR_CAMPO)
         escolhido, outro = (
             (self.botao_disponibilizar, self.botao_incluir)
             if self.modo_bloco == MODO_DISPONIBILIZAR
@@ -549,16 +898,39 @@ class AppAutomacaoSEI(ctk.CTk):
         )
 
     def _secao_console(self):
-        self.console = ctk.CTkTextbox(self, wrap="word", activate_scrollbars=True)
-        self.console.grid(row=5, column=0, padx=24, pady=(0, 12), sticky="nsew")
+        """
+        Log da execucao, na FAIXA 2 da janela (fora da area rolavel).
+
+        Fica entre os campos e o rodape porque e o que o operador olha o tempo
+        todo: sempre visivel, sem precisar rolar. Ocupa a largura inteira e
+        CRESCE junto com a janela - o peso da linha 2 faz a log take o espaco
+        extra quando o operador maximiza, em vez de deixar um vao vazio. O
+        "minsize" garante uma altura util mesmo na menor janela possivel.
+        """
+        self.grid_rowconfigure(2, weight=PESO_LOG, minsize=ALT_LOG)
+        self.console = ctk.CTkTextbox(
+            self, wrap="word", activate_scrollbars=True,
+            fg_color=COR_CARTAO, corner_radius=12, height=ALT_LOG,
+        )
+        self.console.grid(
+            row=2, column=0, padx=PAD_CARTAO, pady=(0, PAD_CARTAO), sticky="nsew",
+        )
         self.console.configure(state="disabled")
 
     def _secao_botao(self):
+        """
+        Rodape FIXO: faixa de aviso do modo e o botao Iniciar.
 
+        Ocupa as faixas 3 e 4 da janela, fora da area rolavel: e o que garante
+        que o operador sempre alcanca o botao Iniciar, mesmo com o conteudo
+        rolado. Ambas as linhas tem peso 0 - elas nao esticam quando a janela
+        cresce, porque um aviso e um botao nao devem virar faixas de meio
+        palmo de altura.
+        """
         # Faixa de modo: deixa obvio, ANTES de clicar, se o programa vai
         # apenas simular ou realmente gravar documentos no SEI. Fica logo
         # acima do botao, no fim da tela, para nao atrapalhar o grid das
-        # secoes (que ocupam as linhas 2 a 5).
+        # secoes (que ocupam a area rolavel da faixa 1).
         texto_modo = (
             "MODO SIMULACAO: le a planilha e confere os processos, sem criar nada no SEI."
             if SIMULAR else
@@ -571,18 +943,25 @@ class AppAutomacaoSEI(ctk.CTk):
             fg_color=("#8a6100", "#5c4200") if SIMULAR else ("#8b1a1a", "#5c1010"),
             text_color="#ffffff",
             font=ctk.CTkFont(weight="bold", size=12),
-            height=30,
+            height=32,
         )
-        self.etiqueta_modo.grid(row=7, column=0, padx=24, pady=(0, 12), sticky="ew")
+        # Mesma largura e mesma margem do log e do corpo: as tres faixas ficam
+        # alinhadas pelas bordas, e a tela para de parecer "colada num canto".
+        self.etiqueta_modo.grid(
+            row=3, column=0, padx=PAD_CARTAO, pady=(0, 10), sticky="ew",
+        )
         self.botao_iniciar = ctk.CTkButton(
             self,
             text="Iniciar Automacao",
-            height=52,
+            height=54,
+            corner_radius=10,
             font=ctk.CTkFont(size=18, weight="bold"),
             fg_color=AZUL_CLARO, hover_color=HOVER_CLARO,
             command=self.iniciar_automacao,
         )
-        self.botao_iniciar.grid(row=8, column=0, padx=24, pady=(0, 24), sticky="ew")
+        self.botao_iniciar.grid(
+            row=4, column=0, padx=PAD_CARTAO, pady=(0, 16), sticky="ew",
+        )
 
     def _registrar_bloco(self):
         """
@@ -628,7 +1007,11 @@ class AppAutomacaoSEI(ctk.CTk):
         if not usuario or not senha:
             return
         if self.entrada_unidade.get().strip():
-            return                      # ja preenchida (pelo usuario ou antes)
+            # Ja preenchida (padrao UNIDADE_ALVO ou o que o usuario digitou).
+            # Ainda assim registramos onde o login caiu, para o log deixar
+            # claro se vai haver troca de unidade ou nao.
+            self._comparar_unidade_login()
+            return
         try:
             self._injetar_credenciais(usuario, senha)
             from app4_inclusao import InclusaoDocumentoSEI
@@ -637,12 +1020,30 @@ class AppAutomacaoSEI(ctk.CTk):
                 return
             detectada = (api.unidade_atual or "").strip()
             if detectada:
-                self.entrada_unidade.insert(0, detectada)
                 self._api = api
-                self.log.log(f"Unidade detectada no login: {detectada}")
-                self._validar_documento()
+                self._comparar_unidade_login(detectada)
         except Exception:  # noqa: BLE001 - deteccao e conveniência, nao essencial
             return
+
+    def _comparar_unidade_login(self, detectada=None):
+        """
+        Registra onde o login caiu e se isso exige troca de unidade.
+
+        Este metodo NAO escreve no campo Unidade. O destino e o alvo fixo
+        (UNIDADE_ALVO); a unidade do login e so informacao de contexto. Confundir
+        as duas ja fez o programa mirar na unidade errada: o SEI devolve a
+        ultima unidade acessada, que varia entre sessoes.
+        """
+        alvo = self.entrada_unidade.get().strip()
+        if detectada is None:
+            detectada = getattr(self._api, "unidade_atual", "") or "(desconhecida)"
+        if detectada == alvo:
+            self.log.log(f"Login caiu na unidade alvo ({alvo}): sem troca.")
+        else:
+            self.log.log(
+                f"Login caiu em {detectada}, mas o alvo e {alvo}: "
+                "a automacao vai trocar de unidade antes de gravar."
+            )
 
     def _validar_documento(self):
         """
@@ -775,6 +1176,13 @@ class AppAutomacaoSEI(ctk.CTk):
         modelo = self.entrada_modelo.get().strip()
 
         bloco1, bloco2 = self._registrar_bloco()
+        # Furador da trava de NAO VISUALIZADO: so vem True se o operador
+        # marcou a caixa E confirmou o aviso na janela de confirmacao.
+        # O .get() e lido AQUI, no clique, e nao guardado em variavel: a tela
+        # nao depende de nenhum "_pintar_aviso_prazo" ter rodado antes. Assim
+        # o valor e sempre o que esta marcado na hora, e nao o que sobrou de
+        # um estado anterior.
+        abrir_nao_visualizado = bool(self.check_abrir_nao_visualizado.get())
         if self.modo_bloco == MODO_SEM_BLOCO:
             acao_bloco = "NAO incluir em bloco de assinatura"
         elif self.modo_bloco == MODO_DISPONIBILIZAR:
@@ -802,8 +1210,19 @@ class AppAutomacaoSEI(ctk.CTk):
                 f"Bloco 1: {bloco1 or '(nao informado)'}  |  "
                 f"Bloco 2: {bloco2 or '(nao informado)'}\n"
                 f"Acao no bloco: {acao_bloco}\n\n"
-                "Cada linha da planilha cria UM documento, no SEU nome. Confirma?"
+                "Cada linha da planilha cria UM documento, no SEU nome."
+                + (
+                    "\n\n*** ATENCAO ***\nVoce marcou abrir processo NAO VISUALIZADO.\n"
+                    "Abrir um processo vermelho (nao lido) INICIA A CONTAGEM DE\n"
+                    "PRAZO no SEI e nao da para desfazer. Vale para TODOS os\n"
+                    "vermelhos da planilha, e o responsavel nao e avisado.\n"
+                    if abrir_nao_visualizado else ""
+                )
+                + "\n\nConfirma?"
             )
+        # Sincroniza o aviso com a caixa antes de perguntar: se o comando do
+        # checkbox nao tiver rodado, o texto do aviso ainda seria o antigo.
+        self._pintar_aviso_prazo()
         if not messagebox.askyesno("Confirmar", pergunta, parent=self):
             self.log.log("Operacao cancelada pelo usuario.")
             return
@@ -814,7 +1233,8 @@ class AppAutomacaoSEI(ctk.CTk):
                        self.entrada_bloco, self.entrada_bloco2,
                        self.botao_incluir, self.botao_disponibilizar,
                        self.botao_sem_bloco, self.entrada_unidade,
-                       self.entrada_tipo, self.entrada_modelo):
+                       self.entrada_tipo, self.entrada_modelo,
+                       self.check_abrir_nao_visualizado):
             widget.configure(state="disabled")
         self.botao_iniciar.configure(text="Executando...")
 
@@ -825,6 +1245,7 @@ class AppAutomacaoSEI(ctk.CTk):
             args=(
                 usuario, senha, self.caminho_planilha, bloco1, bloco2,
                 self.modo_bloco, unidade, tipo, modelo,
+                abrir_nao_visualizado,
             ),
             daemon=True,
         )
@@ -852,7 +1273,7 @@ class AppAutomacaoSEI(ctk.CTk):
 
     def _thread_automacao(
         self, usuario, senha, planilha, bloco1, bloco2, modo_bloco,
-        unidade, tipo, modelo,
+        unidade, tipo, modelo, abrir_nao_visualizado=False,
     ):
         """
         Roda FORA da thread principal. Tudo que precisar da interface volta
@@ -874,6 +1295,11 @@ class AppAutomacaoSEI(ctk.CTk):
                 self.log.log("Acao no bloco: incluir e disponibilizar")
             else:
                 self.log.log("Acao no bloco: so incluir")
+            if abrir_nao_visualizado:
+                self.log.log(
+                    "ATENCAO: abrindo processo NAO VISUALIZADO (vermelho) - "
+                    "isso INICIA A CONTAGEM DE PRAZO no SEI."
+                )
             self.log.log("=" * 66)
 
             # LGPD: os logs de auditoria do backend contem IDs de processo.
@@ -910,11 +1336,29 @@ class AppAutomacaoSEI(ctk.CTk):
             self._api = api
             if not api.autenticar():
                 raise RuntimeError("Falha no login. Verifique usuario e senha.")
-            api.trocar_unidade()
+            # Rastreabilidade antes da troca: o login sempre cai na unidade
+            # padrao do operador (110031718), e e para a unidade ALVO que o
+            # lote precisa ir. Sem esta linha, uma troca falhada deixaria o
+            # programa operando na unidade errada sem ninguem perceber.
+            self.log.log(f"Unidade alvo: {unidade or '(vazia)'} | "
+                         f"unidade apos login: {getattr(api, 'unidade_atual', '') or '(desconhecida)'}")
+            if not unidade.strip():
+                raise RuntimeError(
+                    "Unidade vazia: a automacao nao pode seguir sem saber em qual "
+                    "unidade gravar. Preencha o campo Unidade."
+                )
+            ok = api.trocar_unidade()
+            if not ok:
+                raise RuntimeError(
+                    f"O SEI recusou a troca para a unidade {unidade}. "
+                    "Verifique se este usuario tem permissao nela."
+                )
+            self.log.log(f"Unidade apos troca: {getattr(api, 'unidade_atual', '') or '(desconhecida)'}")
 
             args = montar_args_lote(
                 planilha, plano=SIMULAR, bloco1=bloco1, bloco2=bloco2,
                 modo=modo_bloco, unidade=unidade, tipo=tipo, modelo=modelo,
+                mesmo_assim=abrir_nao_visualizado,
             )
             executar_lote(api, args, None, TEXTO_INICIAL)
             if SIMULAR:
@@ -930,11 +1374,22 @@ class AppAutomacaoSEI(ctk.CTk):
                 self.log.log("Confira os documentos criados dentro de cada processo no SEI.")
                 self.log.log("=" * 66)
 
-        except SystemExit:
-            # O backend usa sys.exit() para abortar com mensagem (ex.: processo
-            # NAO VISUALIZADO, coluna faltando). Dentro da thread isso nao
-            # fecha a interface: registramos e encerramos so a execucao.
-            self.log.log("Operacao interrompida pelo sistema (ver mensagem acima).")
+        except SystemExit as erro:
+            # O backend usa sys.exit("texto") para abortar com motivo (ex.:
+            # coluna faltando na planilha, processo NAO VISUALIZADO). O texto
+            # NAO vai para o stdout: o sys.exit() guarda a mensagem em
+            # erro.code e sai em silencio. Antes este handler ignorava esse
+            # campo e escrevia "ver mensagem acima", dejando o operador sem
+            # nenhuma pista do motivo real. Sem esta linha, uma coluna
+            # faltando na planilha aparecia como "operacao interrompida" e
+            # nada mais.
+            motivo = getattr(erro, "code", None)
+            if motivo is None:
+                self.log.log("Operacao interrompida sem mensagem de motivo.")
+            elif str(motivo).strip() in ("0", ""):
+                self.log.log("Operacao interrompida (saida com codigo 0).")
+            else:
+                self.log.log(f"Operacao interrompida: {motivo}")
         except Exception as erro:  # noqa: BLE001 - erro vira log, nunca traceback cru
             self.log.log(f"ERRO: {erro}")
             self.log.log(traceback.format_exc(limit=3))
