@@ -34,8 +34,18 @@ print("    OK: modulos importados")
 
 # =============================================================================
 print("\n[2] Namespace da GUI cobre todos os args.X lidos pelo app4")
-with open(os.path.join(RAIZ, "app4_inclusao.py"), encoding="utf-8") as arquivo:
-    fonte_app4 = arquivo.read()
+# Apos a refatoracao, os args.X vivem em sei_escrita/ (lote.py, cli.py...);
+# a fachada app4_inclusao.py mantem so re-exports. Varre os dois lugares.
+_fontes = [os.path.join(RAIZ, "app4_inclusao.py")]
+_fontes += [
+    os.path.join(RAIZ, "sei_escrita", nome)
+    for nome in sorted(os.listdir(os.path.join(RAIZ, "sei_escrita")))
+    if nome.endswith(".py")
+]
+fonte_app4 = ""
+for _caminho in _fontes:
+    with open(_caminho, encoding="utf-8") as arquivo:
+        fonte_app4 += arquivo.read() + "\n"
 
 lidos = set(re.findall(r"\bargs\.(\w+)", fonte_app4))
 lidos |= set(re.findall(r'args\[["\']([^"\']+)["\']\]', fonte_app4))
